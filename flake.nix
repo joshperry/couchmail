@@ -14,9 +14,6 @@
         packages = {
           couchmail = pkgs.callPackage ./nix/bridge.nix { };
           couchmail-ui = pkgs.callPackage ./nix/ui.nix { };
-          couchdb = pkgs.callPackage ./nix/couchdb.nix {
-            couchmail-ui = self.packages.${system}.couchmail-ui;
-          };
           default = self.packages.${system}.couchmail;
         };
       };

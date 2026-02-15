@@ -82,7 +82,7 @@ in
     # ── CouchDB service ─────────────────────────────────────────
     services.couchdb = {
       enable = true;
-      package = packages.couchdb;
+      package = pkgs.couchdb3;
       bindAddress = "127.0.0.1";
       port = cfg.couchdbPort;
       databaseDir = cfg.couchdbDataDir;
