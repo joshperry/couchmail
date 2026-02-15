@@ -1,13 +1,17 @@
 <script>
+  import { onMount } from 'svelte';
+
   let token = '';
-  let email = '';
+  let domain = '';
+  let username = '';
   let password = '';
   let confirmPassword = '';
   let error = '';
+  let tokenError = '';
   let success = false;
   let submitting = false;
+  let loading = true;
 
-  // Parse token from URL hash query string
   function getToken() {
     const hash = window.location.hash;
     const qmark = hash.indexOf('?');
@@ -16,16 +20,31 @@
     return params.get('token') || '';
   }
 
-  token = getToken();
+  onMount(async () => {
+    token = getToken();
+    if (!token) {
+      tokenError = 'No invite token found. You need a valid invite link to register.';
+      loading = false;
+      return;
+    }
+    try {
+      const res = await fetch(`/_couchmail/api/register?token=${encodeURIComponent(token)}`);
+      const data = await res.json();
+      if (!res.ok) {
+        tokenError = data.error || 'Invalid invite token.';
+      } else {
+        domain = data.domain;
+      }
+    } catch {
+      tokenError = 'Could not validate invite token.';
+    }
+    loading = false;
+  });
 
   async function handleSubmit() {
     error = '';
-    if (!token) {
-      error = 'No invite token provided.';
-      return;
-    }
-    if (!email) {
-      error = 'Email is required.';
+    if (!username.trim()) {
+      error = 'Username is required.';
       return;
     }
     if (password.length < 8) {
@@ -37,12 +56,13 @@
       return;
     }
 
+    const name = username.trim() + '@' + domain;
     submitting = true;
     try {
       const res = await fetch('/_couchmail/api/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, name: email, password })
+        body: JSON.stringify({ token, name, password })
       });
       const body = await res.json();
       if (!res.ok) {
@@ -61,15 +81,20 @@
   <div class="card">
     <h1>Create Account</h1>
 
-    {#if success}
+    {#if loading}
+      <p>Validating invite...</p>
+    {:else if success}
       <p class="success">Account created. You can now <a href="#/login">sign in</a>.</p>
-    {:else if !token}
-      <p class="error">No invite token found. You need a valid invite link to register.</p>
+    {:else if tokenError}
+      <p class="error">{tokenError}</p>
     {:else}
       <form on:submit|preventDefault={handleSubmit}>
         <div class="form-group">
-          <label for="reg-email">Email</label>
-          <input id="reg-email" type="text" bind:value={email} placeholder="you@example.com" required />
+          <label for="reg-username">Username</label>
+          <div class="email-field">
+            <input id="reg-username" type="text" bind:value={username} placeholder="you" required />
+            <span class="domain-suffix">@{domain}</span>
+          </div>
         </div>
         <div class="form-group">
           <label for="reg-password">Password</label>
@@ -103,6 +128,27 @@
   }
   .register-wrapper h1 {
     text-align: center;
+  }
+  .email-field {
+    display: flex;
+    align-items: center;
+    gap: 0;
+  }
+  .email-field input {
+    flex: 1;
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+    border-right: none;
+  }
+  .domain-suffix {
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--border);
+    border-left: none;
+    border-radius: 0 4px 4px 0;
+    background: var(--surface);
+    color: var(--muted);
+    white-space: nowrap;
+    font-size: 0.95rem;
   }
   .success {
     color: #16a34a;

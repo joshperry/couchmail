@@ -15,7 +15,7 @@
     try {
       const [docResult, aliasResult] = await Promise.all([
         getDoc('org.couchdb.user:' + user.name).catch(() => null),
-        allDocs({ startkey: 'alias-', endkey: 'alias-\ufff0', include_docs: true })
+        allDocs({ startkey: 'alias-', endkey: 'alias-\ufff0', include_docs: true }).catch(() => ({ rows: [] }))
       ]);
       userDoc = docResult;
       aliases = (aliasResult.rows || [])

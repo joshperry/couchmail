@@ -430,6 +430,35 @@ const httpServer = http.createServer(async (req, res) => {
   }
 
   // ── Register (invite-based) ────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/register') {
+    res.setHeader('Content-Type', 'application/json')
+    const token = url.searchParams.get('token')
+    if (!token) {
+      res.writeHead(400)
+      res.end(JSON.stringify({ error: 'token is required' }))
+      return
+    }
+    try {
+      const invite = await db.get(`invite-${token}`).catch(() => null)
+      if (!invite) {
+        res.writeHead(404)
+        res.end(JSON.stringify({ error: 'Invalid invite token' }))
+        return
+      }
+      if (invite.used_by) {
+        res.writeHead(409)
+        res.end(JSON.stringify({ error: 'Invite already used' }))
+        return
+      }
+      res.writeHead(200)
+      res.end(JSON.stringify({ ok: true, domain: invite.domain }))
+    } catch (err) {
+      res.writeHead(500)
+      res.end(JSON.stringify({ error: err.message }))
+    }
+    return
+  }
+
   if (req.method === 'POST' && url.pathname === '/register') {
     res.setHeader('Content-Type', 'application/json')
     try {
