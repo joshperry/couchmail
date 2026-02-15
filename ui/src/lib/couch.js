@@ -1,7 +1,5 @@
-const BASE = '';
-
 export async function login(name, password) {
-  const res = await fetch('/_session', {
+  const res = await fetch('/_couchmail/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
@@ -12,11 +10,14 @@ export async function login(name, password) {
 }
 
 export async function logout() {
-  await fetch('/_session', { method: 'DELETE', credentials: 'include' });
+  await fetch('/_couchmail/api/auth/logout', {
+    method: 'POST',
+    credentials: 'include'
+  });
 }
 
 export async function getSession() {
-  const res = await fetch('/_session', { credentials: 'include' });
+  const res = await fetch('/_couchmail/api/auth/session', { credentials: 'include' });
   return res.json();
 }
 

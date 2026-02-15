@@ -63,7 +63,7 @@ in
       password = lib.mkOption {
         type = lib.types.port;
         default = 40574;
-        description = "HTTP port for password change endpoint";
+        description = "HTTP port for bridge (auth, password, CouchDB proxy)";
       };
     };
 
@@ -89,10 +89,10 @@ in
       extraConfigFiles = [
         (pkgs.writeText "couchmail-couchdb.ini" ''
           [chttpd]
-          authentication_handlers = {chttpd_auth, cookie_authentication_handler}, {chttpd_auth, default_authentication_handler}
+          authentication_handlers = {chttpd_auth, proxy_authentication_handler}, {chttpd_auth, default_authentication_handler}
 
           [chttpd_auth]
-          authentication_db = mail
+          proxy_use_secret = true
 
           [couchdb]
           single_node = true
@@ -100,7 +100,7 @@ in
       ];
     };
 
-    # Generate local.ini with admin credentials from sops
+    # Generate local.ini with admin credentials and proxy secret
     systemd.services.couchdb.serviceConfig.ExecStartPre = lib.mkAfter [
       "+${pkgs.writeShellScript "couchdb-write-admins" ''
         set -euo pipefail
@@ -108,11 +108,24 @@ in
         couchdb_user=$(read_env COUCHDB_USER ${cfg.couchdbCredentialsFile})
         couchdb_pass=$(read_env COUCHDB_PASSWORD ${cfg.couchdbCredentialsFile})
         couch_pass=$(read_env COUCH_PASSWORD ${cfg.bridgePasswordFile})
+
+        # Generate proxy auth secret if it doesn't exist
+        secret_file=/run/couchmail/proxy-secret
+        mkdir -p /run/couchmail
+        if [ ! -f "$secret_file" ]; then
+          ${pkgs.openssl}/bin/openssl rand -hex 32 > "$secret_file"
+        fi
+        chmod 640 "$secret_file"
+        chown couchdb:couchmail "$secret_file"
+        proxy_secret=$(cat "$secret_file")
+
         local_ini=${cfg.couchdbDataDir}/local.ini
         {
           printf '[admins]\n'
           printf '%s = %s\n' "$couchdb_user" "$couchdb_pass"
           printf 'mail = %s\n' "$couch_pass"
+          printf '\n[chttpd_auth]\n'
+          printf 'secret = %s\n' "$proxy_secret"
         } > "$local_ini"
         chown couchdb:couchdb "$local_ini"
         chmod 600 "$local_ini"
@@ -134,6 +147,7 @@ in
         COUCH_HOST = "localhost";
         COUCH_USER = "mail";
         PASSWORD_PORT = toString cfg.bridgePorts.password;
+        COUCH_PROXY_SECRET_FILE = "/run/couchmail/proxy-secret";
       };
       serviceConfig = {
         ExecStart = "${packages.couchmail}/bin/couchmail";
@@ -183,14 +197,11 @@ in
           try_files $uri $uri/ /index.html;
         '';
       };
-      locations."/_session" = {
-        proxyPass = "http://127.0.0.1:${toString cfg.couchdbPort}/_session";
+      locations."/_couchmail/api/" = {
+        proxyPass = "http://127.0.0.1:${toString cfg.bridgePorts.password}/";
       };
       locations."/mail/" = {
-        proxyPass = "http://127.0.0.1:${toString cfg.couchdbPort}/mail/";
-      };
-      locations."/_couchmail/api/password" = {
-        proxyPass = "http://127.0.0.1:${toString cfg.bridgePorts.password}/password";
+        proxyPass = "http://127.0.0.1:${toString cfg.bridgePorts.password}/couch/mail/";
       };
     };
   };

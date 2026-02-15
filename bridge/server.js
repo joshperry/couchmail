@@ -1,6 +1,7 @@
 const net = require('net'),
       http = require('http'),
       fs = require('fs'),
+      crypto = require('crypto'),
       events = require('events'),
       util = require('util'),
       carrier = require('carrier'),
@@ -19,10 +20,63 @@ const dbuser = process.env.COUCH_USER,
             Authorization: `Basic ${Buffer.from(`${dbuser}:${dbpass}`).toString('base64')}`,
           },
         },
-//        log: (id, args) => {
-//          console.log(id, args)
-//        },
       })
+
+// ── Proxy auth secret ────────────────────────────────────────
+const proxySecretFile = process.env.COUCH_PROXY_SECRET_FILE
+let proxySecret = ''
+if (proxySecretFile) {
+  proxySecret = fs.readFileSync(proxySecretFile, 'utf8').trim()
+  console.log('Proxy: loaded proxy auth secret')
+}
+
+const SESSION_COOKIE = 'couchmail_session'
+const SESSION_TTL = 24 * 60 * 60 // 24 hours in seconds
+
+// ── Session cookie helpers ───────────────────────────────────
+function makeSessionCookie(name, roles) {
+  const payload = JSON.stringify({
+    n: name,
+    r: roles,
+    e: Math.floor(Date.now() / 1000) + SESSION_TTL
+  })
+  const encoded = Buffer.from(payload).toString('base64')
+  const hmac = crypto.createHmac('sha256', proxySecret).update(encoded).digest('hex')
+  return `${encoded}.${hmac}`
+}
+
+function parseSessionCookie(cookie) {
+  if (!cookie) return null
+  const [encoded, hmac] = cookie.split('.')
+  if (!encoded || !hmac) return null
+  const expected = crypto.createHmac('sha256', proxySecret).update(encoded).digest('hex')
+  if (!crypto.timingSafeEqual(Buffer.from(hmac, 'hex'), Buffer.from(expected, 'hex'))) return null
+  try {
+    const payload = JSON.parse(Buffer.from(encoded, 'base64').toString())
+    if (payload.e < Math.floor(Date.now() / 1000)) return null
+    return { name: payload.n, roles: payload.r }
+  } catch { return null }
+}
+
+function getCookieValue(req, name) {
+  const header = req.headers.cookie || ''
+  const match = header.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`))
+  return match ? match[1] : null
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = ''
+    req.on('data', chunk => body += chunk)
+    req.on('end', () => resolve(body))
+    req.on('error', reject)
+  })
+}
+
+// ── CouchDB proxy auth token ────────────────────────────────
+function makeCouchProxyToken(username) {
+  return crypto.createHmac('sha256', proxySecret).update(username).digest('hex')
+}
 
 // This function returns a generalized handler for a postfix request (domain, alias, or mailbox)
 let clientId = 0
@@ -201,53 +255,162 @@ const dovecotAuthHandler = () => {
   }
 }
 
-// ── Password change HTTP endpoint ──────────────────────────────
-// Accepts POST with JSON body { username, new_password }
-// Authenticated via CouchDB cookie forwarding from the UI
+// ── HTTP server (auth + password + CouchDB proxy) ────────────
 const passwordPort = parseInt(process.env.PASSWORD_PORT || '40574')
-const passwordServer = http.createServer(async (req, res) => {
-  res.setHeader('Content-Type', 'application/json')
+const httpServer = http.createServer(async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`)
 
-  if (req.method !== 'POST' || req.url !== '/password') {
-    res.writeHead(404)
-    res.end(JSON.stringify({ error: 'Not found' }))
+  // ── Auth: login ──────────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/auth/login') {
+    res.setHeader('Content-Type', 'application/json')
+    try {
+      const { name, password } = JSON.parse(await readBody(req))
+      if (!name || !password) {
+        res.writeHead(400)
+        res.end(JSON.stringify({ error: 'name and password required' }))
+        return
+      }
+
+      const doc = await db.get(USER_PREFIX + name).catch(() => null)
+      if (!doc || !doc.dovecot_password) {
+        res.writeHead(401)
+        res.end(JSON.stringify({ error: 'Invalid credentials' }))
+        return
+      }
+
+      // dovecot_password is stored as {CRYPT}$2a$... — strip the {CRYPT} prefix
+      const hash = doc.dovecot_password.replace(/^\{CRYPT\}/, '')
+      if (!bcrypt.compareSync(password, hash)) {
+        res.writeHead(401)
+        res.end(JSON.stringify({ error: 'Invalid credentials' }))
+        return
+      }
+
+      const roles = doc.roles || []
+      const cookie = makeSessionCookie(name, roles)
+      res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${cookie}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL}`)
+      res.writeHead(200)
+      res.end(JSON.stringify({ ok: true, name, roles }))
+      console.log(`Auth: login success for ${name}`)
+    } catch (err) {
+      console.log(`Auth: login error ${err.message}`)
+      res.writeHead(500)
+      res.end(JSON.stringify({ error: 'Internal error' }))
+    }
     return
   }
 
-  let body = ''
-  for await (const chunk of req) body += chunk
-
-  try {
-    const { username, new_password } = JSON.parse(body)
-    if (!username || !new_password) {
-      res.writeHead(400)
-      res.end(JSON.stringify({ error: 'username and new_password required' }))
-      return
+  // ── Auth: session check ──────────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/auth/session') {
+    res.setHeader('Content-Type', 'application/json')
+    const session = parseSessionCookie(getCookieValue(req, SESSION_COOKIE))
+    if (session) {
+      res.writeHead(200)
+      res.end(JSON.stringify({ userCtx: { name: session.name, roles: session.roles } }))
+    } else {
+      res.writeHead(200)
+      res.end(JSON.stringify({ userCtx: { name: null, roles: [] } }))
     }
+    return
+  }
 
-    const docId = USER_PREFIX + username
-    const doc = await db.get(docId)
-
-    // Hash for dovecot (bcrypt)
-    const salt = bcrypt.genSaltSync(10)
-    const hash = bcrypt.hashSync(new_password, salt)
-    doc.dovecot_password = `{CRYPT}${hash}`
-
-    // Set plaintext password — CouchDB hashes it on next write for cookie auth
-    doc.password = new_password
-
-    await db.insert(doc)
-    console.log(`Password: updated both passwords for ${username}`)
+  // ── Auth: logout ─────────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/auth/logout') {
+    res.setHeader('Content-Type', 'application/json')
+    res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`)
     res.writeHead(200)
     res.end(JSON.stringify({ ok: true }))
-  } catch (err) {
-    console.log(`Password: error ${err.message}`)
-    res.writeHead(err.statusCode || 500)
-    res.end(JSON.stringify({ error: err.message }))
+    return
   }
+
+  // ── Password change ──────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/password') {
+    res.setHeader('Content-Type', 'application/json')
+    try {
+      const { username, new_password } = JSON.parse(await readBody(req))
+      if (!username || !new_password) {
+        res.writeHead(400)
+        res.end(JSON.stringify({ error: 'username and new_password required' }))
+        return
+      }
+
+      // Verify caller is the same user or an admin
+      const session = parseSessionCookie(getCookieValue(req, SESSION_COOKIE))
+      if (!session || (session.name !== username && !(session.roles || []).includes('admin'))) {
+        res.writeHead(403)
+        res.end(JSON.stringify({ error: 'Forbidden' }))
+        return
+      }
+
+      const docId = USER_PREFIX + username
+      const doc = await db.get(docId)
+
+      // Hash for dovecot (bcrypt)
+      const salt = bcrypt.genSaltSync(10)
+      const hash = bcrypt.hashSync(new_password, salt)
+      doc.dovecot_password = `{CRYPT}${hash}`
+
+      // Set plaintext password — CouchDB hashes it on next write for cookie auth
+      doc.password = new_password
+
+      await db.insert(doc)
+      console.log(`Password: updated both passwords for ${username}`)
+      res.writeHead(200)
+      res.end(JSON.stringify({ ok: true }))
+    } catch (err) {
+      console.log(`Password: error ${err.message}`)
+      res.writeHead(err.statusCode || 500)
+      res.end(JSON.stringify({ error: err.message }))
+    }
+    return
+  }
+
+  // ── CouchDB proxy ───────────────────────────────────────
+  if (url.pathname.startsWith('/couch/')) {
+    const couchPath = '/' + url.pathname.slice('/couch/'.length) + url.search
+    const session = parseSessionCookie(getCookieValue(req, SESSION_COOKIE))
+
+    const headers = { ...req.headers }
+    delete headers.host
+    delete headers.cookie
+
+    if (session && proxySecret) {
+      headers['X-Auth-CouchDB-UserName'] = session.name
+      headers['X-Auth-CouchDB-Roles'] = session.roles.join(',')
+      headers['X-Auth-CouchDB-Token'] = makeCouchProxyToken(session.name)
+    }
+
+    const proxyReq = http.request({
+      hostname: '127.0.0.1',
+      port: 5984,
+      path: couchPath,
+      method: req.method,
+      headers
+    }, proxyRes => {
+      // Remove CouchDB's own Set-Cookie (we manage sessions)
+      const resHeaders = { ...proxyRes.headers }
+      delete resHeaders['set-cookie']
+      res.writeHead(proxyRes.statusCode, resHeaders)
+      proxyRes.pipe(res)
+    })
+
+    proxyReq.on('error', err => {
+      console.log(`Proxy: error ${err.message}`)
+      res.writeHead(502)
+      res.end(JSON.stringify({ error: 'CouchDB unavailable' }))
+    })
+
+    req.pipe(proxyReq)
+    return
+  }
+
+  // ── 404 ──────────────────────────────────────────────────
+  res.setHeader('Content-Type', 'application/json')
+  res.writeHead(404)
+  res.end(JSON.stringify({ error: 'Not found' }))
 })
-passwordServer.listen(passwordPort, '127.0.0.1', () => {
-  console.log(`Password: listening on 127.0.0.1:${passwordPort}`)
+httpServer.listen(passwordPort, '127.0.0.1', () => {
+  console.log(`HTTP: listening on 127.0.0.1:${passwordPort}`)
 })
 
 console.log('Creating TCP listeners')
