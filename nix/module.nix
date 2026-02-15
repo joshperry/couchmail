@@ -96,12 +96,26 @@ in
 
           [couchdb]
           single_node = true
-
-          [httpd_global_handlers]
-          _couchmail = {couch_httpd_misc_handlers, handle_utils_dir_req, "${packages.couchmail-ui}"}
         '')
       ];
     };
+
+    # Generate local.ini with admin credentials from sops
+    systemd.services.couchdb.serviceConfig.ExecStartPre = lib.mkAfter [
+      "+${pkgs.writeShellScript "couchdb-write-admins" ''
+        set -euo pipefail
+        source ${cfg.couchdbCredentialsFile}
+        source ${cfg.bridgePasswordFile}
+        local_ini=${cfg.couchdbDataDir}/local.ini
+        {
+          printf '[admins]\n'
+          printf '%s = %s\n' "$COUCHDB_USER" "$COUCHDB_PASSWORD"
+          printf 'mail = %s\n' "$COUCH_PASSWORD"
+        } > "$local_ini"
+        chown couchdb:couchdb "$local_ini"
+        chmod 600 "$local_ini"
+      ''}"
+    ];
 
     # ── Couchmail bridge ────────────────────────────────────────
     users.users.couchmail = {
@@ -162,7 +176,10 @@ in
     # ── nginx (optional) ────────────────────────────────────────
     services.nginx.virtualHosts.${cfg.nginx.virtualHost} = lib.mkIf cfg.nginx.enable {
       locations."/_couchmail/" = {
-        proxyPass = "http://127.0.0.1:${toString cfg.couchdbPort}/_couchmail/";
+        alias = "${packages.couchmail-ui}/";
+        extraConfig = ''
+          try_files $uri $uri/ /index.html;
+        '';
       };
       locations."/_session" = {
         proxyPass = "http://127.0.0.1:${toString cfg.couchdbPort}/_session";
