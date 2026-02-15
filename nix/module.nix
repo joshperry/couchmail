@@ -104,13 +104,15 @@ in
     systemd.services.couchdb.serviceConfig.ExecStartPre = lib.mkAfter [
       "+${pkgs.writeShellScript "couchdb-write-admins" ''
         set -euo pipefail
-        source ${cfg.couchdbCredentialsFile}
-        source ${cfg.bridgePasswordFile}
+        read_env() { ${pkgs.gnugrep}/bin/grep "^$1=" "$2" | ${pkgs.coreutils}/bin/cut -d= -f2-; }
+        couchdb_user=$(read_env COUCHDB_USER ${cfg.couchdbCredentialsFile})
+        couchdb_pass=$(read_env COUCHDB_PASSWORD ${cfg.couchdbCredentialsFile})
+        couch_pass=$(read_env COUCH_PASSWORD ${cfg.bridgePasswordFile})
         local_ini=${cfg.couchdbDataDir}/local.ini
         {
           printf '[admins]\n'
-          printf '%s = %s\n' "$COUCHDB_USER" "$COUCHDB_PASSWORD"
-          printf 'mail = %s\n' "$COUCH_PASSWORD"
+          printf '%s = %s\n' "$couchdb_user" "$couchdb_pass"
+          printf 'mail = %s\n' "$couch_pass"
         } > "$local_ini"
         chown couchdb:couchdb "$local_ini"
         chmod 600 "$local_ini"
