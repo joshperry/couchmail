@@ -86,19 +86,21 @@ in
       bindAddress = "127.0.0.1";
       port = cfg.couchdbPort;
       databaseDir = cfg.couchdbDataDir;
-      configFile = pkgs.writeText "couchmail-couchdb.ini" ''
-        [chttpd]
-        authentication_handlers = {chttpd_auth, cookie_authentication_handler}, {chttpd_auth, default_authentication_handler}
+      extraConfigFiles = [
+        (pkgs.writeText "couchmail-couchdb.ini" ''
+          [chttpd]
+          authentication_handlers = {chttpd_auth, cookie_authentication_handler}, {chttpd_auth, default_authentication_handler}
 
-        [chttpd_auth]
-        authentication_db = mail
+          [chttpd_auth]
+          authentication_db = mail
 
-        [couchdb]
-        single_node = true
+          [couchdb]
+          single_node = true
 
-        [httpd_global_handlers]
-        _couchmail = {couch_httpd_misc_handlers, handle_utils_dir_req, "${packages.couchmail-ui}"}
-      '';
+          [httpd_global_handlers]
+          _couchmail = {couch_httpd_misc_handlers, handle_utils_dir_req, "${packages.couchmail-ui}"}
+        '')
+      ];
     };
 
     # ── Couchmail bridge ────────────────────────────────────────
