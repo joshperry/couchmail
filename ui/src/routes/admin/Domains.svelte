@@ -20,6 +20,7 @@
             id.includes('.') &&
             !id.startsWith('org.couchdb.user:') &&
             !id.startsWith('alias-') &&
+            !id.startsWith('invite-') &&
             !id.startsWith('_design/');
         })
         .map(r => r.doc);

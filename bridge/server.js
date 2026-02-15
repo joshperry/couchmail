@@ -429,6 +429,146 @@ const httpServer = http.createServer(async (req, res) => {
     return
   }
 
+  // ── Register (invite-based) ────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/register') {
+    res.setHeader('Content-Type', 'application/json')
+    try {
+      const { token, name, password } = JSON.parse(await readBody(req))
+      if (!token || !name || !password) {
+        res.writeHead(400)
+        res.end(JSON.stringify({ error: 'token, name, and password required' }))
+        return
+      }
+
+      // Look up invite
+      const inviteId = `invite-${token}`
+      const invite = await db.get(inviteId).catch(() => null)
+      if (!invite) {
+        res.writeHead(404)
+        res.end(JSON.stringify({ error: 'Invalid invite token' }))
+        return
+      }
+      if (invite.used_by) {
+        res.writeHead(409)
+        res.end(JSON.stringify({ error: 'Invite already used' }))
+        return
+      }
+
+      // Verify email matches invite domain
+      const domain = invite.domain
+      if (!name.endsWith('@' + domain)) {
+        res.writeHead(400)
+        res.end(JSON.stringify({ error: `Email must end with @${domain}` }))
+        return
+      }
+
+      // Check user doesn't already exist
+      const existing = await db.get(USER_PREFIX + name).catch(() => null)
+      if (existing) {
+        res.writeHead(409)
+        res.end(JSON.stringify({ error: 'Account already exists' }))
+        return
+      }
+
+      // Create user with bcrypt dovecot_password
+      const salt = bcrypt.genSaltSync(10)
+      const dovecotHash = `{CRYPT}${bcrypt.hashSync(password, salt)}`
+      await db.insert({
+        _id: USER_PREFIX + name,
+        name,
+        type: 'user',
+        roles: [],
+        password,
+        dovecot_password: dovecotHash
+      })
+
+      // Mark invite as used
+      invite.used_by = name
+      invite.used_at = new Date().toISOString()
+      await db.insert(invite)
+
+      console.log(`Register: ${name} registered via invite ${token}`)
+      res.writeHead(200)
+      res.end(JSON.stringify({ ok: true }))
+    } catch (err) {
+      console.log(`Register: error ${err.message}`)
+      res.writeHead(err.statusCode || 500)
+      res.end(JSON.stringify({ error: err.message }))
+    }
+    return
+  }
+
+  // ── Sieve script (user's own) ─────────────────────────
+  if (req.method === 'GET' && url.pathname === '/sieve') {
+    res.setHeader('Content-Type', 'application/json')
+    const session = parseSessionCookie(getCookieValue(req, SESSION_COOKIE))
+    if (!session) {
+      res.writeHead(401)
+      res.end(JSON.stringify({ error: 'Not authenticated' }))
+      return
+    }
+    try {
+      const userDoc = await db.get(USER_PREFIX + session.name)
+      const scriptId = userDoc.sieve && userDoc.sieve.main_script
+      if (!scriptId) {
+        res.writeHead(200)
+        res.end(JSON.stringify({ script: '', scriptId: null, scriptRev: null }))
+        return
+      }
+      const scriptDoc = await db.get(scriptId)
+      res.writeHead(200)
+      res.end(JSON.stringify({ script: scriptDoc.script, scriptId: scriptDoc._id, scriptRev: scriptDoc._rev }))
+    } catch (err) {
+      console.log(`Sieve GET: error ${err.message}`)
+      res.writeHead(err.statusCode || 500)
+      res.end(JSON.stringify({ error: err.message }))
+    }
+    return
+  }
+
+  if (req.method === 'PUT' && url.pathname === '/sieve') {
+    res.setHeader('Content-Type', 'application/json')
+    const session = parseSessionCookie(getCookieValue(req, SESSION_COOKIE))
+    if (!session) {
+      res.writeHead(401)
+      res.end(JSON.stringify({ error: 'Not authenticated' }))
+      return
+    }
+    try {
+      const { script, scriptId, scriptRev } = JSON.parse(await readBody(req))
+      if (typeof script !== 'string') {
+        res.writeHead(400)
+        res.end(JSON.stringify({ error: 'script is required' }))
+        return
+      }
+
+      const userDoc = await db.get(USER_PREFIX + session.name)
+      let docId = scriptId || (userDoc.sieve && userDoc.sieve.main_script)
+      let result
+
+      if (docId) {
+        // Update existing script doc
+        result = await db.insert({ _id: docId, _rev: scriptRev, script })
+      } else {
+        // Create new script doc with random ID
+        docId = crypto.randomBytes(16).toString('hex')
+        result = await db.insert({ _id: docId, script })
+        // Update user doc with sieve reference
+        userDoc.sieve = { main_script: docId }
+        await db.insert(userDoc)
+      }
+
+      console.log(`Sieve PUT: updated script for ${session.name}`)
+      res.writeHead(200)
+      res.end(JSON.stringify({ ok: true, scriptId: docId, scriptRev: result.rev }))
+    } catch (err) {
+      console.log(`Sieve PUT: error ${err.message}`)
+      res.writeHead(err.statusCode || 500)
+      res.end(JSON.stringify({ error: err.message }))
+    }
+    return
+  }
+
   // ── CouchDB proxy ───────────────────────────────────────
   if (url.pathname.startsWith('/couch/')) {
     const couchPath = '/' + url.pathname.slice('/couch/'.length) + url.search

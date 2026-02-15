@@ -9,13 +9,17 @@
   import Domains from './routes/admin/Domains.svelte';
   import Aliases from './routes/admin/Aliases.svelte';
   import Invites from './routes/admin/Invites.svelte';
+  import Register from './routes/Register.svelte';
 
   let route = '';
   let user = null;
   let loading = true;
 
+  const publicRoutes = ['login', 'register'];
+
   const routes = {
     'login': Login,
+    'register': Register,
     '': Dashboard,
     'dashboard': Dashboard,
     'settings': Settings,
@@ -28,7 +32,9 @@
 
   function getRoute() {
     const hash = window.location.hash.replace(/^#\/?/, '');
-    return hash || '';
+    // Strip query string for route matching (register?token=...)
+    const route = hash.split('?')[0];
+    return route || '';
   }
 
   function navigate(path) {
@@ -56,7 +62,7 @@
 
   function onHashChange() {
     route = getRoute();
-    if (!user && route !== 'login') {
+    if (!user && !publicRoutes.includes(route)) {
       navigate('login');
     }
   }
@@ -64,7 +70,7 @@
   onMount(async () => {
     await checkSession();
     route = getRoute();
-    if (!user && route !== 'login') {
+    if (!user && !publicRoutes.includes(route)) {
       navigate('login');
       route = 'login';
     }
@@ -85,7 +91,7 @@
 {#if loading}
   <div class="container"><p>Loading...</p></div>
 {:else}
-  {#if user && route !== 'login'}
+  {#if user && !publicRoutes.includes(route)}
     <nav>
       <a class="brand" href="#/dashboard">CouchMail</a>
       <a href="#/dashboard">Dashboard</a>
@@ -104,6 +110,8 @@
   <div class="container">
     {#if route === 'login'}
       <Login on:login={(e) => onLogin(e.detail)} />
+    {:else if route === 'register'}
+      <Register />
     {:else}
       <svelte:component this={currentComponent} {user} />
     {/if}
