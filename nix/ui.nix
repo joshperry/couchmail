@@ -6,7 +6,7 @@ buildNpmPackage {
 
   src = ../ui;
 
-  npmDepsHash = lib.fakeHash;
+  npmDepsHash = "sha256-GCY+m9lyWWRz+aXg9h4h1l+XEIz7L4kB2aXoWr+yZaw=";
 
   buildPhase = ''
     runHook preBuild
