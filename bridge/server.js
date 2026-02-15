@@ -339,6 +339,17 @@ const httpServer = http.createServer(async (req, res) => {
         return
       }
 
+      // Migrate legacy password hashes to bcrypt on successful login
+      if (!doc.dovecot_password.startsWith('{CRYPT}') && !doc.dovecot_password.startsWith('{BLF-CRYPT}')) {
+        const salt = bcrypt.genSaltSync(10)
+        doc.dovecot_password = `{CRYPT}${bcrypt.hashSync(password, salt)}`
+        db.insert(doc).then(() => {
+          console.log(`Auth: migrated ${name} password to bcrypt`)
+        }).catch(err => {
+          console.log(`Auth: failed to migrate ${name} password: ${err.message}`)
+        })
+      }
+
       const roles = doc.roles || []
       const cookie = makeSessionCookie(name, roles)
       res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${cookie}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL}`)
