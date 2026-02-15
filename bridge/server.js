@@ -77,6 +77,57 @@ function readBody(req) {
   })
 }
 
+// ── Dovecot password verification ────────────────────────────
+// Supports {CRYPT} (bcrypt), {SSHA512}, {SSHA256}, {SHA512}, {SHA256},
+// and unprefixed (default_pass_scheme, typically SSHA512)
+function verifyDovecotPassword(password, stored) {
+  // {CRYPT} prefix — bcrypt
+  if (stored.startsWith('{CRYPT}')) {
+    return bcrypt.compareSync(password, stored.slice(7))
+  }
+  // {BLF-CRYPT} prefix — also bcrypt
+  if (stored.startsWith('{BLF-CRYPT}')) {
+    return bcrypt.compareSync(password, stored.slice(11))
+  }
+
+  // Extract scheme from {SCHEME}hash or use default (SSHA512)
+  let scheme = 'SSHA512'
+  let hash = stored
+  const schemeMatch = stored.match(/^\{([^}]+)\}(.*)$/)
+  if (schemeMatch) {
+    scheme = schemeMatch[1].toUpperCase()
+    hash = schemeMatch[2]
+  }
+
+  const buf = Buffer.from(hash, 'base64')
+
+  switch (scheme) {
+    case 'SSHA512': {
+      const digest = buf.slice(0, 64)
+      const salt = buf.slice(64)
+      const computed = crypto.createHash('sha512').update(password).update(salt).digest()
+      return crypto.timingSafeEqual(digest, computed)
+    }
+    case 'SSHA256': {
+      const digest = buf.slice(0, 32)
+      const salt = buf.slice(32)
+      const computed = crypto.createHash('sha256').update(password).update(salt).digest()
+      return crypto.timingSafeEqual(digest, computed)
+    }
+    case 'SHA512': {
+      const computed = crypto.createHash('sha512').update(password).digest()
+      return crypto.timingSafeEqual(buf, computed)
+    }
+    case 'SHA256': {
+      const computed = crypto.createHash('sha256').update(password).digest()
+      return crypto.timingSafeEqual(buf, computed)
+    }
+    default:
+      console.log(`Auth: unsupported password scheme: ${scheme}`)
+      return false
+  }
+}
+
 // ── CouchDB proxy auth token ────────────────────────────────
 function makeCouchProxyToken(username) {
   return crypto.createHmac('sha256', proxySecret).update(username).digest('hex')
@@ -282,9 +333,7 @@ const httpServer = http.createServer(async (req, res) => {
         return
       }
 
-      // dovecot_password is stored as {CRYPT}$2a$... — strip the {CRYPT} prefix
-      const hash = doc.dovecot_password.replace(/^\{CRYPT\}/, '')
-      if (!bcrypt.compareSync(password, hash)) {
+      if (!verifyDovecotPassword(password, doc.dovecot_password)) {
         res.writeHead(401)
         res.end(JSON.stringify({ error: 'Invalid credentials' }))
         return
