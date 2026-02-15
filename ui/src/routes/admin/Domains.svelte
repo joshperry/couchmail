@@ -17,6 +17,7 @@
         .filter(r => {
           const id = r.id;
           return id &&
+            id.includes('.') &&
             !id.startsWith('org.couchdb.user:') &&
             !id.startsWith('alias-') &&
             !id.startsWith('_design/');
