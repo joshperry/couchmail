@@ -1,0 +1,19 @@
+{
+	"name": "couchmail",
+	"description": "Provides virtual mail config store for Postfix and Dovecot in CouchDB",
+	"version": "0.1.0",
+	"license": "MIT",
+	"author": {
+		"name": "Josh Perry",
+		"email": "josh@6bit.com"
+	},
+	"repository": {
+		"type": "git",
+		"url": "http://github.com/joshperry/couchmail"
+	},
+	"dependencies": {
+		"carrier": "^0.3.0",
+		"nano": "^10.1.3"
+	},
+	"main": "./server.js"
+}
