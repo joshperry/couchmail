@@ -25,21 +25,13 @@ const dbuser = process.env.COUCH_USER,
 // ── Proxy auth secret ────────────────────────────────────────
 const proxySecretFile = process.env.COUCH_PROXY_SECRET_FILE
 let proxySecret = ''
-if (proxySecretFile && fs.existsSync(proxySecretFile)) {
-  proxySecret = fs.readFileSync(proxySecretFile, 'utf8').trim()
-  console.log('Proxy: loaded proxy auth secret')
-} else if (proxySecretFile) {
-  console.log(`Proxy: secret file ${proxySecretFile} not found, waiting...`)
-  // Poll for secret file (created by CouchDB pre-start)
-  const waitForSecret = () => {
-    if (fs.existsSync(proxySecretFile)) {
-      proxySecret = fs.readFileSync(proxySecretFile, 'utf8').trim()
-      console.log('Proxy: loaded proxy auth secret (delayed)')
-    } else {
-      setTimeout(waitForSecret, 1000)
-    }
+if (proxySecretFile) {
+  try {
+    proxySecret = fs.readFileSync(proxySecretFile, 'utf8').trim()
+    console.log('Proxy: loaded proxy auth secret')
+  } catch (err) {
+    console.log(`Proxy: could not read ${proxySecretFile}: ${err.message}`)
   }
-  setTimeout(waitForSecret, 1000)
 }
 
 const SESSION_COOKIE = 'couchmail_session'

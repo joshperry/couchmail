@@ -144,6 +144,7 @@ in
 
     systemd.services.couchmail = {
       description = "CouchDB mail bridge for postfix/dovecot";
+      requires = [ "couchdb.service" ];
       after = [ "couchdb.service" "network.target" ];
       wantedBy = [ "multi-user.target" ];
       environment = {
