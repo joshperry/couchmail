@@ -110,13 +110,16 @@ in
         couch_pass=$(read_env COUCH_PASSWORD ${cfg.bridgePasswordFile})
 
         # Generate proxy auth secret if it doesn't exist
-        secret_file=/run/couchmail/proxy-secret
-        mkdir -p /run/couchmail
+        secret_dir=/run/couchmail-secrets
+        secret_file=$secret_dir/proxy-secret
+        mkdir -p "$secret_dir"
         if [ ! -f "$secret_file" ]; then
           ${pkgs.openssl}/bin/openssl rand -hex 32 > "$secret_file"
         fi
         chmod 640 "$secret_file"
         chown couchdb:couchmail "$secret_file"
+        chmod 750 "$secret_dir"
+        chown couchdb:couchmail "$secret_dir"
         proxy_secret=$(cat "$secret_file")
 
         local_ini=${cfg.couchdbDataDir}/local.ini
@@ -147,7 +150,7 @@ in
         COUCH_HOST = "localhost";
         COUCH_USER = "mail";
         PASSWORD_PORT = toString cfg.bridgePorts.password;
-        COUCH_PROXY_SECRET_FILE = "/run/couchmail/proxy-secret";
+        COUCH_PROXY_SECRET_FILE = "/run/couchmail-secrets/proxy-secret";
       };
       serviceConfig = {
         ExecStart = "${packages.couchmail}/bin/couchmail";
