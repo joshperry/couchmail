@@ -60,6 +60,11 @@ in
         default = 40573;
         description = "TCP port for postfix virtual_alias_maps lookup";
       };
+      password = lib.mkOption {
+        type = lib.types.port;
+        default = 40574;
+        description = "HTTP port for password change endpoint";
+      };
     };
 
     nginx = {
@@ -110,6 +115,7 @@ in
       environment = {
         COUCH_HOST = "localhost";
         COUCH_USER = "mail";
+        PASSWORD_PORT = toString cfg.bridgePorts.password;
       };
       serviceConfig = {
         ExecStart = "${packages.couchmail}/bin/couchmail";
@@ -161,6 +167,9 @@ in
       };
       locations."/mail/" = {
         proxyPass = "http://127.0.0.1:${toString cfg.couchdbPort}/mail/";
+      };
+      locations."/_couchmail/api/password" = {
+        proxyPass = "http://127.0.0.1:${toString cfg.bridgePorts.password}/password";
       };
     };
   };

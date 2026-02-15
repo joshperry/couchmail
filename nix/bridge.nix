@@ -6,7 +6,7 @@ buildNpmPackage {
 
   src = ../bridge;
 
-  npmDepsHash = "sha256-Z1tNXtDmbhSB4rgYWnvEowQ2CsmFluLMd49aDS7WGSY=";
+  npmDepsHash = "sha256-fsX+CpoOFfYo9fmGVaEYFdv2ZsDvK3g8+VA6UmGwUpM=";
 
   dontNpmBuild = true;
 

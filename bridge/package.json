@@ -12,6 +12,7 @@
 		"url": "http://github.com/joshperry/couchmail"
 	},
 	"dependencies": {
+		"bcryptjs": "^2.4.3",
 		"carrier": "^0.3.0",
 		"nano": "^10.1.3"
 	},

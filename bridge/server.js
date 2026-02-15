@@ -1,8 +1,12 @@
 const net = require('net'),
+      http = require('http'),
       fs = require('fs'),
       events = require('events'),
       util = require('util'),
-      carrier = require('carrier')
+      carrier = require('carrier'),
+      bcrypt = require('bcryptjs')
+
+const USER_PREFIX = 'org.couchdb.user:'
 
 const dbuser = process.env.COUCH_USER,
       dbpass = process.env.COUCH_PASSWORD,
@@ -82,7 +86,7 @@ const domainHandler = () =>
 // Postfix handler specialized for finding mailboxes
 const mailboxHandler = () =>
   postfixHandler('mailbox', (username, callback) =>
-    db.get(username)
+    db.get(USER_PREFIX + username)
       .then(body => username)
       .catch(err => {
         console.log(`mailbox lookup err ${err.message}`)
@@ -139,10 +143,10 @@ const dovecotAuthHandler = () => {
                 vars.user = line.split('/')[1].split('\t')[0]
                 console.log(`Dovecot: looking up auth for ${vars.user}`)
                 try {
-                  const body = await db.get(vars.user)
+                  const body = await db.get(USER_PREFIX + vars.user)
                   console.log(`Dovecot: Found entry in db for ${body._id}`)
                   client.write('O')
-                  client.write(JSON.stringify({ password : body.password }))
+                  client.write(JSON.stringify({ password : body.dovecot_password }))
                   client.write('\n')
                 } catch(err) {
                   console.log(`Dovecot: responding with Not Found (${err})`)
@@ -156,7 +160,7 @@ const dovecotAuthHandler = () => {
                 if(paths[2] === 'name') {
                   // Dovecot caches the compiled script based on the ID we return
                   // so let's return a composite key based on the _id and _rev of the script
-                  db.get(vars.user)
+                  db.get(USER_PREFIX + vars.user)
                     .then(body =>
                       db.get(body.sieve[paths[3]])
                         .then(body => {
@@ -196,6 +200,55 @@ const dovecotAuthHandler = () => {
       })
   }
 }
+
+// ── Password change HTTP endpoint ──────────────────────────────
+// Accepts POST with JSON body { username, new_password }
+// Authenticated via CouchDB cookie forwarding from the UI
+const passwordPort = parseInt(process.env.PASSWORD_PORT || '40574')
+const passwordServer = http.createServer(async (req, res) => {
+  res.setHeader('Content-Type', 'application/json')
+
+  if (req.method !== 'POST' || req.url !== '/password') {
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: 'Not found' }))
+    return
+  }
+
+  let body = ''
+  for await (const chunk of req) body += chunk
+
+  try {
+    const { username, new_password } = JSON.parse(body)
+    if (!username || !new_password) {
+      res.writeHead(400)
+      res.end(JSON.stringify({ error: 'username and new_password required' }))
+      return
+    }
+
+    const docId = USER_PREFIX + username
+    const doc = await db.get(docId)
+
+    // Hash for dovecot (bcrypt)
+    const salt = bcrypt.genSaltSync(10)
+    const hash = bcrypt.hashSync(new_password, salt)
+    doc.dovecot_password = `{CRYPT}${hash}`
+
+    // Set plaintext password — CouchDB hashes it on next write for cookie auth
+    doc.password = new_password
+
+    await db.insert(doc)
+    console.log(`Password: updated both passwords for ${username}`)
+    res.writeHead(200)
+    res.end(JSON.stringify({ ok: true }))
+  } catch (err) {
+    console.log(`Password: error ${err.message}`)
+    res.writeHead(err.statusCode || 500)
+    res.end(JSON.stringify({ error: err.message }))
+  }
+})
+passwordServer.listen(passwordPort, '127.0.0.1', () => {
+  console.log(`Password: listening on 127.0.0.1:${passwordPort}`)
+})
 
 console.log('Creating TCP listeners')
 net.createServer(domainHandler())
