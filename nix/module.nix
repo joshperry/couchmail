@@ -4,7 +4,7 @@ flake:
 
 let
   cfg = config.services.couchmail;
-  packages = flake.packages.${pkgs.system};
+  packages = flake.packages.${pkgs.stdenv.hostPlatform.system};
 in
 {
   options.services.couchmail = {
