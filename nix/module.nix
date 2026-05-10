@@ -173,7 +173,7 @@ in
     '';
 
     # ── Postfix virtual map integration ─────────────────────────
-    services.postfix.config = lib.mkIf config.services.postfix.enable {
+    services.postfix.settings.main = lib.mkIf config.services.postfix.enable {
       virtual_mailbox_domains = "tcp:localhost:${toString cfg.bridgePorts.domain}";
       virtual_mailbox_maps = "tcp:localhost:${toString cfg.bridgePorts.mailbox}";
       virtual_alias_maps = "tcp:localhost:${toString cfg.bridgePorts.alias}";
