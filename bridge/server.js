@@ -743,7 +743,18 @@ const oauthServer = http.createServer(async (req, res) => {
     try {
       if (!await checkCredentials(name, password)) {
         console.log(`OAuth2: invalid credentials for ${name}`)
-        return reply(400, { error: 'invalid_grant' })
+        // RFC 6749 says 400 invalid_grant, but Dovecot 2.4.5 reports any
+        // grant error as a temporary failure (db_oauth2_lookup_passwd_grant
+        // checks result->error before its invalid_grant case), which skips
+        // auth penalties and confuses clients. A 200 with active=false goes
+        // through oauth2_active_attribute instead and counts as a password
+        // mismatch. Only dovecot (holding the client secret) can get here.
+        return reply(200, {
+          access_token: crypto.randomBytes(16).toString('hex'),
+          token_type: 'bearer',
+          email: name,
+          active: 'false',
+        })
       }
     } catch (err) {
       // 5xx makes dovecot report a temporary failure, not a wrong password
@@ -756,13 +767,14 @@ const oauthServer = http.createServer(async (req, res) => {
       token_type: 'bearer',
       expires_in: OAUTH_TOKEN_TTL,
       email: name,
+      active: 'true',
     })
   }
 
   // ── Introspection (RFC 7662) ───────────────────────────────
   if (url.pathname === '/introspect') {
     const name = parseAccessToken(form.get('token'))
-    return reply(200, name ? { active: true, email: name } : { active: false })
+    return reply(200, name ? { active: 'true', email: name } : { active: 'false' })
   }
 
   reply(404, { error: 'invalid_request' })

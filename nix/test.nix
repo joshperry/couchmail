@@ -134,8 +134,10 @@ pkgs.testers.runNixOSTest {
         assert out == "401", out
 
     with subtest("IMAP login goes through the OAuth2 password grant"):
-        assert imap_login("alice@${domain}", "wrongpass").startswith("NO"), "wrong password accepted"
-        assert imap_login("nobody@${domain}", "alicepass").startswith("NO"), "unknown user accepted"
+        # Must be a real auth failure (penalties, fail2ban), not a temporary one
+        for user, pw in [("alice@${domain}", "wrongpass"), ("nobody@${domain}", "alicepass")]:
+            out = imap_login(user, pw)
+            assert out.startswith("NO") and "AUTHENTICATIONFAILED" in out, f"{user}: {out}"
         assert imap_login("alice@${domain}", "alicepass") == "OK"
         machine.succeed("journalctl -u couchmail | grep 'OAuth2: granted token for alice@${domain}'")
 

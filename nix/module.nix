@@ -214,6 +214,10 @@ in
         oauth2_introspection_url = "http://127.0.0.1:${toString cfg.bridgePorts.oauth2}/introspect";
         oauth2_introspection_mode = "post";
         oauth2_client_id = "dovecot";
+        # Bad passwords come back as active=false (see bridge /token), so
+        # dovecot treats them as a password mismatch, not a temporary failure
+        oauth2_active_attribute = "active";
+        oauth2_active_value = "true";
         oauth2_client_secret = "<${cfg.oauth2ClientSecretFile}";
       };
 
