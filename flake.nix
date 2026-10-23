@@ -2,7 +2,7 @@
   description = "Couchmail — CouchDB-backed mail management with web UI";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
     flake-parts.url = "github:hercules-ci/flake-parts";
   };
 
@@ -16,6 +16,7 @@
           couchmail-ui = pkgs.callPackage ./nix/ui.nix { };
           default = self.packages.${system}.couchmail;
         };
+        checks.vm = import ./nix/test.nix self { inherit pkgs; };
       };
 
       flake = {

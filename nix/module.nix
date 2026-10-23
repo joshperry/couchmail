@@ -65,6 +65,25 @@ in
         default = 40574;
         description = "HTTP port for bridge (auth, password, CouchDB proxy)";
       };
+      oauth2 = lib.mkOption {
+        type = lib.types.port;
+        default = 40575;
+        description = ''
+          Loopback-only HTTP port for dovecot's OAuth2 password grant.
+          Never proxy this port.
+        '';
+      };
+    };
+
+    oauth2ClientSecretFile = lib.mkOption {
+      type = lib.types.str;
+      example = "/run/secrets/couchmail/oauth2-client-secret";
+      description = ''
+        File containing the shared OAuth2 client secret dovecot uses to
+        authenticate to the bridge's token endpoint. Read by dovecot's config
+        process and passed to the bridge as a systemd credential, so it is
+        never copied to the Nix store.
+      '';
     };
 
     nginx = {
@@ -151,10 +170,12 @@ in
         COUCH_HOST = "localhost";
         COUCH_USER = "mail";
         PASSWORD_PORT = toString cfg.bridgePorts.password;
+        OAUTH2_PORT = toString cfg.bridgePorts.oauth2;
         COUCH_PROXY_SECRET_FILE = "/run/couchmail-secrets/proxy-secret";
       };
       serviceConfig = {
         ExecStart = "${packages.couchmail}/bin/couchmail";
+        LoadCredential = [ "oauth2-client-secret:${cfg.oauth2ClientSecretFile}" ];
         RuntimeDirectory = "couchmail";
         EnvironmentFile = cfg.bridgePasswordFile;
         User = "couchmail";
@@ -164,14 +185,6 @@ in
       };
     };
 
-    # ── Dovecot dict auth config ────────────────────────────────
-    environment.etc."dovecot/dovecot-dict-auth.conf.ext".text = ''
-      uri = proxy:/run/couchmail/dovecot-auth.sock:auth
-      password_key = %u
-      user_key = %u
-      default_pass_scheme = SSHA512
-    '';
-
     # ── Postfix virtual map integration ─────────────────────────
     services.postfix.settings.main = lib.mkIf config.services.postfix.enable {
       virtual_mailbox_domains = "tcp:localhost:${toString cfg.bridgePorts.domain}";
@@ -179,17 +192,42 @@ in
       virtual_alias_maps = "tcp:localhost:${toString cfg.bridgePorts.alias}";
     };
 
-    # ── Dovecot integration ─────────────────────────────────────
-    # Dovecot 2.3 setting names; 2.4 reworked passdb dict and sieve scripts.
+    # ── Dovecot integration (2.4) ───────────────────────────────
+    assertions = [{
+      assertion = !config.services.dovecot2.enable
+        || lib.versionAtLeast config.services.dovecot2.package.version "2.4";
+      message = "services.couchmail requires Dovecot 2.4 (passdb oauth2 and 2.4 sieve settings).";
+    }];
+
+    # Sieve storage and the LMTP sieve plugin need pigeonhole's modules
+    environment.systemPackages = lib.mkIf config.services.dovecot2.enable [
+      config.services.dovecot2.package.passthru.dovecot_pigeonhole
+    ];
+
     services.dovecot2.settings = lib.mkIf config.services.dovecot2.enable {
-      # Auth via couchmail dict proxy
-      passdb = {
-        driver = "dict";
-        args = "/etc/dovecot/dovecot-dict-auth.conf.ext";
+      # Auth: dovecot hands credentials to the bridge (OAuth2 password grant).
+      # This passdb can only verify passwords, not answer lookups, so a static
+      # userdb needs userdb_static_allow_all_users (postfix vets recipients).
+      "passdb oauth2" = {
+        driver = "oauth2";
+        oauth2_grant_url = "http://127.0.0.1:${toString cfg.bridgePorts.oauth2}/token";
+        oauth2_introspection_url = "http://127.0.0.1:${toString cfg.bridgePorts.oauth2}/introspect";
+        oauth2_introspection_mode = "post";
+        oauth2_client_id = "dovecot";
+        oauth2_client_secret = "<${cfg.oauth2ClientSecretFile}";
       };
 
-      # Sieve via couchmail
-      plugin.sieve = "dict:proxy:/run/couchmail/dovecot-auth.sock:sieve;name=main_script";
+      # Sieve: each user's main_script, looked up over the bridge's dict socket
+      "sieve_script personal" = {
+        sieve_script_type = "personal";
+        sieve_script_driver = "dict";
+        sieve_script_name = "main_script";
+        "dict proxy" = {
+          dict_proxy_socket_path = "/run/couchmail/dovecot-auth.sock";
+          dict_proxy_name = "sieve";
+        };
+      };
+      "protocol lmtp".mail_plugins.sieve = true;
     };
 
     # ── nginx (optional) ────────────────────────────────────────

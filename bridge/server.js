@@ -79,15 +79,16 @@ function readBody(req) {
 
 // ── Dovecot password verification ────────────────────────────
 // Supports {CRYPT} (bcrypt), {SSHA512}, {SSHA256}, {SHA512}, {SHA256},
-// and unprefixed (default_pass_scheme, typically SSHA512)
-function verifyDovecotPassword(password, stored) {
+// and unprefixed (default_pass_scheme, typically SSHA512).
+// Async so bcrypt doesn't block the event loop (postfix lookups share it).
+async function verifyDovecotPassword(password, stored) {
   // {CRYPT} prefix — bcrypt
   if (stored.startsWith('{CRYPT}')) {
-    return bcrypt.compareSync(password, stored.slice(7))
+    return bcrypt.compare(password, stored.slice(7))
   }
   // {BLF-CRYPT} prefix — also bcrypt
   if (stored.startsWith('{BLF-CRYPT}')) {
-    return bcrypt.compareSync(password, stored.slice(11))
+    return bcrypt.compare(password, stored.slice(11))
   }
 
   // Extract scheme from {SCHEME}hash or use default (SSHA512)
@@ -126,6 +127,33 @@ function verifyDovecotPassword(password, stored) {
       console.log(`Auth: unsupported password scheme: ${scheme}`)
       return false
   }
+}
+
+// Check a user's password against CouchDB. Resolves to the user doc on
+// success or null on bad credentials; rejects if CouchDB itself fails, so
+// callers can report a temporary error instead of a wrong password.
+async function checkCredentials(name, password) {
+  let doc
+  try {
+    doc = await db.get(USER_PREFIX + name)
+  } catch (err) {
+    if (err.statusCode === 404) return null
+    throw err
+  }
+  if (!doc.dovecot_password) return null
+  if (!await verifyDovecotPassword(password, doc.dovecot_password)) return null
+
+  // Migrate legacy password hashes to bcrypt on successful login
+  if (!doc.dovecot_password.startsWith('{CRYPT}') && !doc.dovecot_password.startsWith('{BLF-CRYPT}')) {
+    const salt = bcrypt.genSaltSync(10)
+    doc.dovecot_password = `{CRYPT}${bcrypt.hashSync(password, salt)}`
+    db.insert(doc).then(() => {
+      console.log(`Auth: migrated ${name} password to bcrypt`)
+    }).catch(err => {
+      console.log(`Auth: failed to migrate ${name} password: ${err.message}`)
+    })
+  }
+  return doc
 }
 
 // ── CouchDB proxy auth token ────────────────────────────────
@@ -221,15 +249,21 @@ const dovecotEscape = (str) => {
     .replace(/\t/g, '\x01t')
 }
 
-// Handles authentication requests in the dovecot auth format
+// Reverses dovecot's str_tabescape() on incoming protocol fields
+const dovecotUnescape = (str) => {
+  return str.replace(/\x01([01tnr])/g, (_, c) =>
+    ({ '0': '\x00', '1': '\x01', t: '\t', n: '\n', r: '\r' })[c])
+}
+
+// Handles sieve script lookups in the dovecot dict proxy protocol
 const dovecotAuthHandler = () => {
   // Dovecot makes one request per connection
   const CMD_HELLO = 'H'
   const CMD_LOOKUP = 'L'
 
-  const vars = {}
-
   return async client => {
+    // Per-connection state: each connection is for one dict
+    const vars = {}
     console.log('Dovecot: client connected')
     client.on('end', () => { console.log('Dovecot: client disconnected') })
 
@@ -240,29 +274,16 @@ const dovecotAuthHandler = () => {
 
         switch(cmd) {
           case CMD_HELLO:
-            // Each connection is for a specific table and user, cache these values on hello
+            // Each connection is for a specific dict (table), cache it on hello.
+            // The hello's user field is always empty; the user comes with each lookup.
             const vals = line.substring(1).split('\t')
             vars.table = vals[4]
-            vars.user = vals[3]
             break
 
           case CMD_LOOKUP:
+            // L<key>\t<username>
+            vars.user = dovecotUnescape(line.substring(1).split('\t')[1] || '')
             switch(vars.table) {
-              case 'auth':
-                vars.user = line.split('/')[1].split('\t')[0]
-                console.log(`Dovecot: looking up auth for ${vars.user}`)
-                try {
-                  const body = await db.get(USER_PREFIX + vars.user)
-                  console.log(`Dovecot: Found entry in db for ${body._id}`)
-                  client.write('O')
-                  client.write(JSON.stringify({ password : body.dovecot_password }))
-                  client.write('\n')
-                } catch(err) {
-                  console.log(`Dovecot: responding with Not Found (${err})`)
-                  client.write('N\n')
-                }
-                break
-
               case 'sieve':
                 console.log(`Dovecot: looking up sieve for ${vars.user}`)
                 const paths = line.split('\t')[0].split('/')
@@ -326,28 +347,11 @@ const httpServer = http.createServer(async (req, res) => {
         return
       }
 
-      const doc = await db.get(USER_PREFIX + name).catch(() => null)
-      if (!doc || !doc.dovecot_password) {
+      const doc = await checkCredentials(name, password)
+      if (!doc) {
         res.writeHead(401)
         res.end(JSON.stringify({ error: 'Invalid credentials' }))
         return
-      }
-
-      if (!verifyDovecotPassword(password, doc.dovecot_password)) {
-        res.writeHead(401)
-        res.end(JSON.stringify({ error: 'Invalid credentials' }))
-        return
-      }
-
-      // Migrate legacy password hashes to bcrypt on successful login
-      if (!doc.dovecot_password.startsWith('{CRYPT}') && !doc.dovecot_password.startsWith('{BLF-CRYPT}')) {
-        const salt = bcrypt.genSaltSync(10)
-        doc.dovecot_password = `{CRYPT}${bcrypt.hashSync(password, salt)}`
-        db.insert(doc).then(() => {
-          console.log(`Auth: migrated ${name} password to bcrypt`)
-        }).catch(err => {
-          console.log(`Auth: failed to migrate ${name} password: ${err.message}`)
-        })
       }
 
       const roles = doc.roles || []
@@ -656,6 +660,122 @@ net.createServer(mailboxHandler())
 net.createServer(aliasHandler())
   .on('error', err => console.log(err))
   .listen(40573)
+
+// ── Dovecot OAuth2 password grant ────────────────────────────
+// Dovecot's oauth2 passdb POSTs the user's credentials here (RFC 6749
+// password grant) and the bridge checks them, so password hashes never leave
+// the bridge. Separate loopback-only listener: the main HTTP port is proxied
+// by nginx and must never serve this.
+const oauthPort = parseInt(process.env.OAUTH2_PORT || '40575')
+const oauthClientId = process.env.OAUTH2_CLIENT_ID || 'dovecot'
+const oauthSecretFile = process.env.OAUTH2_CLIENT_SECRET_FILE ||
+  (process.env.CREDENTIALS_DIRECTORY && `${process.env.CREDENTIALS_DIRECTORY}/oauth2-client-secret`)
+let oauthClientSecret = ''
+if (oauthSecretFile) {
+  try {
+    oauthClientSecret = fs.readFileSync(oauthSecretFile, 'utf8').trim()
+  } catch (err) {
+    console.log(`OAuth2: could not read ${oauthSecretFile}: ${err.message}`)
+  }
+}
+
+// Tokens only have to survive from the grant to dovecot's introspection
+// call, so a per-process key and a short lifetime are enough.
+const OAUTH_TOKEN_TTL = 60
+const oauthTokenKey = crypto.randomBytes(32)
+
+function makeAccessToken(name) {
+  const payload = Buffer.from(JSON.stringify({
+    u: name,
+    e: Math.floor(Date.now() / 1000) + OAUTH_TOKEN_TTL
+  })).toString('base64url')
+  const mac = crypto.createHmac('sha256', oauthTokenKey).update(payload).digest('base64url')
+  return `${payload}.${mac}`
+}
+
+function parseAccessToken(token) {
+  const [payload, mac] = (token || '').split('.')
+  if (!payload || !mac) return null
+  const expected = crypto.createHmac('sha256', oauthTokenKey).update(payload).digest('base64url')
+  if (mac.length !== expected.length ||
+      !crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(expected))) return null
+  try {
+    const { u, e } = JSON.parse(Buffer.from(payload, 'base64url').toString())
+    return e >= Math.floor(Date.now() / 1000) ? u : null
+  } catch { return null }
+}
+
+// Compare HMACs so the comparison is constant-time regardless of length.
+// Dovecot reads `oauth2_client_secret = <file` verbatim, trailing newline
+// included, so ignore surrounding whitespace like we do for our own copy.
+function secretMatches(given) {
+  const h = s => crypto.createHmac('sha256', oauthTokenKey).update((s || '').trim()).digest()
+  return crypto.timingSafeEqual(h(given), h(oauthClientSecret))
+}
+
+const oauthServer = http.createServer(async (req, res) => {
+  const reply = (status, body) => {
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    res.end(JSON.stringify(body))
+  }
+  const url = new URL(req.url, 'http://localhost')
+  if (req.method !== 'POST') return reply(405, { error: 'invalid_request' })
+
+  let form
+  try {
+    form = new URLSearchParams(await readBody(req))
+  } catch {
+    return reply(400, { error: 'invalid_request' })
+  }
+
+  // ── Token: password grant ──────────────────────────────────
+  if (url.pathname === '/token') {
+    if (form.get('client_id') !== oauthClientId || !secretMatches(form.get('client_secret'))) {
+      console.log('OAuth2: rejected token request with bad client credentials')
+      return reply(401, { error: 'invalid_client' })
+    }
+    if (form.get('grant_type') !== 'password') {
+      return reply(400, { error: 'unsupported_grant_type' })
+    }
+    const name = form.get('username'), password = form.get('password')
+    if (!name || !password) return reply(400, { error: 'invalid_request' })
+
+    try {
+      if (!await checkCredentials(name, password)) {
+        console.log(`OAuth2: invalid credentials for ${name}`)
+        return reply(400, { error: 'invalid_grant' })
+      }
+    } catch (err) {
+      // 5xx makes dovecot report a temporary failure, not a wrong password
+      console.log(`OAuth2: credential check failed for ${name}: ${err.message}`)
+      return reply(503, { error: 'temporarily_unavailable' })
+    }
+    console.log(`OAuth2: granted token for ${name}`)
+    return reply(200, {
+      access_token: makeAccessToken(name),
+      token_type: 'bearer',
+      expires_in: OAUTH_TOKEN_TTL,
+      email: name,
+    })
+  }
+
+  // ── Introspection (RFC 7662) ───────────────────────────────
+  if (url.pathname === '/introspect') {
+    const name = parseAccessToken(form.get('token'))
+    return reply(200, name ? { active: true, email: name } : { active: false })
+  }
+
+  reply(404, { error: 'invalid_request' })
+})
+
+if (oauthClientSecret) {
+  oauthServer.listen(oauthPort, '127.0.0.1', () => {
+    console.log(`OAuth2: listening on 127.0.0.1:${oauthPort}`)
+  })
+} else {
+  // Fail closed: without a client secret, dovecot logins can't be checked
+  console.log('OAuth2: no client secret configured; token endpoint disabled')
+}
 
 console.log('Dovecot: creating Unix listener')
 const dovecotSocket = process.env.COUCH_AUTH_SOCK || '/var/run/couchmail/dovecot-auth.sock'
