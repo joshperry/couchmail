@@ -65,6 +65,14 @@ in
         default = 40574;
         description = "HTTP port for bridge (auth, password, CouchDB proxy)";
       };
+      sieve = lib.mkOption {
+        type = lib.types.port;
+        default = 40576;
+        description = ''
+          Loopback-only port where the bridge answers dovecot's sieve script
+          lookups (dovecot's redis dict driver). Never expose this port.
+        '';
+      };
       oauth2 = lib.mkOption {
         type = lib.types.port;
         default = 40575;
@@ -79,8 +87,9 @@ in
       type = lib.types.str;
       example = "/run/secrets/couchmail/oauth2-client-secret";
       description = ''
-        File containing the shared OAuth2 client secret dovecot uses to
-        authenticate to the bridge's token endpoint. Read by dovecot's config
+        File containing the secret dovecot uses to authenticate to the
+        bridge: the OAuth2 client secret for logins, and the password for
+        sieve lookups. Read by dovecot's config
         process and passed to the bridge as a systemd credential, so it is
         never copied to the Nix store.
       '';
@@ -128,18 +137,10 @@ in
         couchdb_pass=$(read_env COUCHDB_PASSWORD ${cfg.couchdbCredentialsFile})
         couch_pass=$(read_env COUCH_PASSWORD ${cfg.bridgePasswordFile})
 
-        # Generate proxy auth secret if it doesn't exist
-        secret_dir=/run/couchmail-secrets
-        secret_file=$secret_dir/proxy-secret
-        mkdir -p "$secret_dir"
-        if [ ! -f "$secret_file" ]; then
-          ${pkgs.openssl}/bin/openssl rand -hex 32 > "$secret_file"
-        fi
-        chmod 640 "$secret_file"
-        chown couchdb:couchmail "$secret_file"
-        chmod 750 "$secret_dir"
-        chown couchdb:couchmail "$secret_dir"
-        proxy_secret=$(cat "$secret_file")
+        # Proxy auth secret, derived from the bridge's password exactly as the
+        # bridge derives it, so it never has to be shared through a file.
+        # printf is a builtin, so the password never appears in argv.
+        proxy_secret=$(printf '%s' "couchmail-proxy-secret:$couch_pass" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1)
 
         local_ini=${cfg.couchdbDataDir}/local.ini
         {
@@ -171,12 +172,11 @@ in
         COUCH_USER = "mail";
         PASSWORD_PORT = toString cfg.bridgePorts.password;
         OAUTH2_PORT = toString cfg.bridgePorts.oauth2;
-        COUCH_PROXY_SECRET_FILE = "/run/couchmail-secrets/proxy-secret";
+        SIEVE_PORT = toString cfg.bridgePorts.sieve;
       };
       serviceConfig = {
         ExecStart = "${packages.couchmail}/bin/couchmail";
         LoadCredential = [ "oauth2-client-secret:${cfg.oauth2ClientSecretFile}" ];
-        RuntimeDirectory = "couchmail";
         EnvironmentFile = cfg.bridgePasswordFile;
         User = "couchmail";
         Group = "couchmail";
@@ -221,14 +221,16 @@ in
         oauth2_client_secret = "<${cfg.oauth2ClientSecretFile}";
       };
 
-      # Sieve: each user's main_script, looked up over the bridge's dict socket
+      # Sieve: each user's main_script, looked up from the bridge over
+      # loopback TCP (the bridge speaks the Redis protocol for this)
       "sieve_script personal" = {
         sieve_script_type = "personal";
         sieve_script_driver = "dict";
         sieve_script_name = "main_script";
-        "dict proxy" = {
-          dict_proxy_socket_path = "/run/couchmail/dovecot-auth.sock";
-          dict_proxy_name = "sieve";
+        "dict redis" = {
+          redis_host = "127.0.0.1";
+          redis_port = cfg.bridgePorts.sieve;
+          redis_password = "<${cfg.oauth2ClientSecretFile}";
         };
       };
       "protocol lmtp".mail_plugins.sieve = true;

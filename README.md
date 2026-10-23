@@ -7,7 +7,7 @@ CouchDB-backed mail management for Postfix and Dovecot, with a web UI for accoun
 Couchmail stores virtual mail configuration (domains, users, aliases, sieve scripts) in a single CouchDB database and exposes it to mail services through protocol-specific interfaces:
 
 - **Postfix** — TCP lookup tables for domains, mailboxes, and aliases
-- **Dovecot** — Unix socket for password authentication and sieve script retrieval
+- **Dovecot** (2.4) — loopback HTTP for password checks (OAuth2 password grant) and loopback TCP for sieve scripts (Redis protocol)
 - **Web UI** — Svelte SPA for users and admins, served by nginx
 
 ## Architecture
@@ -24,12 +24,13 @@ Couchmail stores virtual mail configuration (domains, users, aliases, sieve scri
 │   Postfix    │────▶│  bridge (server.js)                          │
 │  TCP lookup  │     │   :40571 domains  :40572 mailboxes           │
 │              │     │   :40573 aliases  :40574 HTTP                │
-└─────────────┘     │   unix socket: dovecot auth + sieve          │
-                    └──────────────────┬───────────────────────────┘
-┌─────────────┐                       │
-│   Dovecot   │────▶  (unix socket)   │
-│  dict proxy │                       │
-└─────────────┘     ┌─────────────────▼────────────────────────────┐
+└─────────────┘     │   :40575 OAuth2 token (dovecot logins)       │
+┌─────────────┐     │   :40576 sieve lookups (Redis protocol)      │
+│   Dovecot   │────▶│   all loopback-only; dovecot authenticates   │
+│ oauth2+redis│     │   with a shared client secret                │
+└─────────────┘     └──────────────────┬───────────────────────────┘
+                                       │
+                    ┌──────────────────▼───────────────────────────┐
                     │  CouchDB (:5984)                              │
                     │   mail database — all docs in one place       │
                     └──────────────────────────────────────────────┘
@@ -83,6 +84,7 @@ Import and configure in your flake:
     domain = "example.com";
     couchdbCredentialsFile = "/run/secrets/couchdb-env";  # COUCHDB_USER, COUCHDB_PASSWORD
     bridgePasswordFile = "/run/secrets/couchmail-env";    # COUCH_PASSWORD
+    oauth2ClientSecretFile = "/run/secrets/couchmail-dovecot";  # random string
     nginx = {
       enable = true;
       virtualHost = "example.com";  # existing nginx vhost to add locations to
@@ -93,11 +95,15 @@ Import and configure in your flake:
 
 The module sets up:
 - CouchDB with proxy auth and single-node config
-- Bridge systemd service with dovecot socket and postfix TCP listeners
-- Dovecot dict auth and sieve plugin config
+- Bridge systemd service with postfix, dovecot and HTTP listeners (all TCP)
+- Dovecot 2.4 `passdb oauth2`, dict-backed sieve scripts and the LMTP sieve plugin
 - Postfix virtual lookup table config
 - nginx locations for UI, API, and CouchDB proxy
-- Proxy auth secret generation and persistence
+
+The bridge shares no files or sockets with dovecot or CouchDB; everything
+goes over loopback TCP. Your host's dovecot config still needs a userdb; a
+static one needs `userdb_static_allow_all_users = yes`, since the oauth2
+passdb can only check passwords, not answer existence lookups.
 
 ### Credentials files
 
@@ -112,13 +118,15 @@ COUCHDB_PASSWORD=secret
 COUCH_PASSWORD=bridge-password
 ```
 
-The bridge authenticates to CouchDB as `mail` (a CouchDB admin created by the module). The `COUCH_PASSWORD` is the password for this admin account.
+The bridge authenticates to CouchDB as `mail` (a CouchDB admin created by the module). The `COUCH_PASSWORD` is the password for this admin account. The CouchDB proxy-auth secret is derived from it on both sides, so it needs no file of its own.
+
+**`oauth2ClientSecretFile`** — a random string (e.g. `openssl rand -hex 32`) that dovecot uses to authenticate to the bridge, both for logins and for sieve lookups. Read by dovecot's config process and passed to the bridge as a systemd credential.
 
 ## File structure
 
 ```
 bridge/
-  server.js          Node.js bridge — postfix TCP, dovecot unix socket, HTTP API
+  server.js          Node.js bridge — postfix TCP, dovecot OAuth2 + sieve, HTTP API
   package.json
 
 ui/

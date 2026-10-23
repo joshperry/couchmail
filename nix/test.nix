@@ -152,7 +152,42 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"ls {MAILDIR}/.Filtered/new | grep -q .")
         assert machine.succeed(f"ls {MAILDIR}/new | wc -l").strip() == "1"
         machine.succeed(f"grep -l FILTERME {MAILDIR}/.Filtered/new/*")
-        machine.succeed("journalctl -u couchmail | grep 'looking up sieve for alice@${domain}'")
+        machine.succeed("journalctl -u couchmail | grep 'Sieve: looking up name main_script for alice@${domain}'")
+
+    with subtest("bridge has no filesystem links to dovecot or couchdb"):
+        machine.fail("ss -xlpn | grep couchmail")
+        machine.fail("test -e /run/couchmail")
+        machine.fail("test -e /run/couchmail-secrets")
+        machine.fail("ss -ltnH 'sport = :40576' | grep -v 127.0.0.1")
+
+    with subtest("sieve lookups require dovecot's secret"):
+        def resp(*cmds):
+            script = (
+                "import socket\n"
+                "s=socket.create_connection(('127.0.0.1',40576))\n"
+                f"for c in {list(cmds)!r}:\n"
+                "  s.sendall(('*%d\\r\\n' % len(c) + str().join('$%d\\r\\n%s\\r\\n' % (len(a), a) for a in c)).encode())\n"
+                "  print(s.recv(4096).decode().split('\\r\\n')[0])\n"
+            )
+            return [l.split()[0] for l in machine.succeed(f"${pkgs.python3}/bin/python3 -c {shlex.quote(script)}").splitlines()]
+        key = "alice@${domain}/sieve/name/main_script"
+        out = resp(["GET", key])
+        assert out[0] == "-NOAUTH", out
+        out = resp(["AUTH", "wrong"], ["GET", key])
+        assert out[0] == "-WRONGPASS" and out[1] == "-NOAUTH", out
+        out = resp(["AUTH", "test-client-secret"], ["GET", key], ["GET", "nobody@${domain}/sieve/name/main_script"])
+        assert out[0] == "+OK" and out[1].startswith("$") and out[2] == "$-1", out
+
+    with subtest("derived proxy secret matches couchdb's"):
+        machine.succeed("curl -sf -c /tmp/jar -H 'Content-Type: application/json' -d '{\"name\":\"alice@${domain}\",\"password\":\"alicepass\"}' http://127.0.0.1:40574/auth/login")
+        session = json.loads(machine.succeed("curl -sf -b /tmp/jar http://127.0.0.1:40574/couch/_session"))
+        assert session["userCtx"]["name"] == "alice@${domain}", session
+        # Still matches after couchdb rewrites local.ini on restart
+        machine.systemctl("restart couchdb.service")
+        machine.wait_until_succeeds(f"{COUCH}/_up")
+        machine.wait_for_open_port(40574)
+        session = json.loads(machine.wait_until_succeeds("curl -sf -b /tmp/jar http://127.0.0.1:40574/couch/_session"))
+        assert session["userCtx"]["name"] == "alice@${domain}", session
 
     with subtest("CouchDB outage is a temporary failure, not a wrong password"):
         # Kill rather than stop: stopping would also stop the bridge (Requires=)

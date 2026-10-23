@@ -23,16 +23,13 @@ const dbuser = process.env.COUCH_USER,
       })
 
 // ── Proxy auth secret ────────────────────────────────────────
-const proxySecretFile = process.env.COUCH_PROXY_SECRET_FILE
-let proxySecret = ''
-if (proxySecretFile) {
-  try {
-    proxySecret = fs.readFileSync(proxySecretFile, 'utf8').trim()
-    console.log('Proxy: loaded proxy auth secret')
-  } catch (err) {
-    console.log(`Proxy: could not read ${proxySecretFile}: ${err.message}`)
-  }
-}
+// Derived from the bridge's CouchDB password; couchdb's ExecStartPre derives
+// the same value for its local.ini, so nothing is shared through the
+// filesystem. The `mail` user is a CouchDB admin, so anyone holding the
+// password could already act as any user; the hash can't be reversed.
+const proxySecret = dbpass
+  ? crypto.createHash('sha256').update(`couchmail-proxy-secret:${dbpass}`).digest('hex')
+  : ''
 
 const SESSION_COOKIE = 'couchmail_session'
 const SESSION_TTL = 24 * 60 * 60 // 24 hours in seconds
@@ -242,93 +239,108 @@ const aliasHandler = () =>
       })
   )
 
-// This processes escaped values in stored dovecot data
-const dovecotEscape = (str) => {
-  return str.replace(/\x01/g,'\x011')
-    .replace(/\n/g,'\x01n')
-    .replace(/\t/g, '\x01t')
-}
-
-// Reverses dovecot's str_tabescape() on incoming protocol fields
-const dovecotUnescape = (str) => {
-  return str.replace(/\x01([01tnr])/g, (_, c) =>
-    ({ '0': '\x00', '1': '\x01', t: '\t', n: '\n', r: '\r' })[c])
-}
-
-// Handles sieve script lookups in the dovecot dict proxy protocol
-const dovecotAuthHandler = () => {
-  // Dovecot makes one request per connection
-  const CMD_HELLO = 'H'
-  const CMD_LOOKUP = 'L'
-
-  return async client => {
-    // Per-connection state: each connection is for one dict
-    const vars = {}
-    console.log('Dovecot: client connected')
-    client.on('end', () => { console.log('Dovecot: client disconnected') })
-
-    carrier.carry(client, null, 'ascii')
-      .on('line', async line => {
-        console.log(`Dovecot: got request line (${line})`)
-        const cmd = line[0]
-
-        switch(cmd) {
-          case CMD_HELLO:
-            // Each connection is for a specific dict (table), cache it on hello.
-            // The hello's user field is always empty; the user comes with each lookup.
-            const vals = line.substring(1).split('\t')
-            vars.table = vals[4]
-            break
-
-          case CMD_LOOKUP:
-            // L<key>\t<username>
-            vars.user = dovecotUnescape(line.substring(1).split('\t')[1] || '')
-            switch(vars.table) {
-              case 'sieve':
-                console.log(`Dovecot: looking up sieve for ${vars.user}`)
-                const paths = line.split('\t')[0].split('/')
-                if(paths[2] === 'name') {
-                  // Dovecot caches the compiled script based on the ID we return
-                  // so let's return a composite key based on the _id and _rev of the script
-                  db.get(USER_PREFIX + vars.user)
-                    .then(body =>
-                      db.get(body.sieve[paths[3]])
-                        .then(body => {
-                          console.log(`Dovecot: Found entry in db for ${body._id}`)
-                          client.write('O')
-                          client.write(`${body._id}+${body._rev}`)
-                          client.write('\n')
-                        })
-                        .catch(err => {
-                          console.log('Dovecot: could not find the script document for the user')
-                          client.write('N\n')
-                        })
-                    ).catch(err => {
-                      console.log('Dovecot: could not find script with that name for user')
-                      client.write('N\n')
-                    })
-                } else if(paths[2] === 'data') {
-                  db.get(paths[3].split('+')[0])
-                    .then(body => {
-                      console.log(`Dovecot: Found entry in db for ${body._id}`)
-                      client.write('O')
-                      client.write(dovecotEscape(body.script))
-                      client.write('\n')
-                    })
-                    .catch(err => {
-                      console.log('Dovecot: could not find script with that id')
-                      client.write('N\n')
-                    })
-                }
-                break
-            }
-            break
-        }
-      })
-      .on('end', function() {
-        client.end()
-      })
+// Looks up a user's sieve script for dovecot. `kind` is "name" (returns a
+// data ID for the named script) or "data" (returns the script for an ID).
+// Resolves to null when there is no such script; rejects on CouchDB errors.
+async function sieveLookup(user, kind, id) {
+  const get = docId => db.get(docId).catch(err => {
+    if (err.statusCode === 404) return null
+    throw err
+  })
+  if (kind === 'name') {
+    const userDoc = await get(USER_PREFIX + user)
+    const scriptId = userDoc && userDoc.sieve && userDoc.sieve[id]
+    const script = scriptId && await get(scriptId)
+    // Dovecot caches the compiled script by this ID, so include the rev
+    return script ? `${script._id}+${script._rev}` : null
   }
+  if (kind === 'data') {
+    const script = await get(id.split('+')[0])
+    return script ? script.script : null
+  }
+  return null
+}
+
+// Parses one RESP command (array of bulk strings) from buf.
+// Returns { args, used } or null if more data is needed; throws if malformed.
+function parseRespCommand(buf) {
+  const readLine = from => {
+    const end = buf.indexOf('\r\n', from)
+    return end < 0 ? null : { line: buf.toString('latin1', from, end), next: end + 2 }
+  }
+  const head = readLine(0)
+  if (!head) return null
+  if (head.line[0] !== '*') throw new Error(`expected array, got ${JSON.stringify(head.line)}`)
+  const count = parseInt(head.line.slice(1), 10)
+  if (!(count > 0 && count <= 16)) throw new Error('bad array length')
+  const args = []
+  let pos = head.next
+  for (let i = 0; i < count; i++) {
+    const len = readLine(pos)
+    if (!len) return null
+    if (len.line[0] !== '$') throw new Error('expected bulk string')
+    const n = parseInt(len.line.slice(1), 10)
+    if (!(n >= 0 && n <= 65536)) throw new Error('bad bulk length')
+    if (buf.length < len.next + n + 2) return null
+    args.push(buf.toString('utf8', len.next, len.next + n))
+    pos = len.next + n + 2
+  }
+  return { args, used: pos }
+}
+
+const respBulk = value => {
+  if (value == null) return '$-1\r\n'
+  const data = Buffer.from(value, 'utf8')
+  return Buffer.concat([Buffer.from(`$${data.length}\r\n`), data, Buffer.from('\r\n')])
+}
+
+// Serves dovecot's sieve lookups by speaking the subset of the Redis protocol
+// its redis dict driver uses (AUTH, GET), so dovecot reaches the bridge over
+// loopback TCP rather than a shared unix socket. Keys look like
+// <user>/sieve/name/<script> and <user>/sieve/data/<id>.
+const sieveHandler = client => {
+  let buf = Buffer.alloc(0)
+  let authed = false
+  let replies = Promise.resolve() // keep replies in request order
+
+  const handle = async args => {
+    const cmd = args[0].toUpperCase()
+    if (cmd === 'AUTH') {
+      authed = args.length === 2 && secretMatches(args[1])
+      if (!authed) console.log('Sieve: rejected connection with bad password')
+      return authed ? '+OK\r\n' : '-WRONGPASS invalid password\r\n'
+    }
+    if (cmd === 'PING') return '+PONG\r\n'
+    if (!authed) return '-NOAUTH Authentication required.\r\n'
+    if (cmd !== 'GET' || args.length !== 2) return '-ERR unsupported command\r\n'
+
+    const m = args[1].match(/^(.+)\/sieve\/(name|data)\/(.+)$/)
+    if (!m) return respBulk(null)
+    const [, user, kind, id] = m
+    console.log(`Sieve: looking up ${kind} ${id} for ${user}`)
+    try {
+      return respBulk(await sieveLookup(user, kind, id))
+    } catch (err) {
+      console.log(`Sieve: lookup failed for ${user}: ${err.message}`)
+      return '-ERR lookup failed\r\n'
+    }
+  }
+
+  client.on('data', chunk => {
+    buf = Buffer.concat([buf, chunk])
+    try {
+      let parsed
+      while ((parsed = parseRespCommand(buf))) {
+        buf = buf.subarray(parsed.used)
+        const reply = handle(parsed.args)
+        replies = replies.then(() => reply).then(out => client.write(out))
+      }
+    } catch (err) {
+      console.log(`Sieve: protocol error: ${err.message}`)
+      client.destroy()
+    }
+  })
+  client.on('error', err => console.log(`Sieve: connection error: ${err.message}`))
 }
 
 // ── HTTP server (auth + password + CouchDB proxy) ────────────
@@ -789,39 +801,15 @@ if (oauthClientSecret) {
   console.log('OAuth2: no client secret configured; token endpoint disabled')
 }
 
-console.log('Dovecot: creating Unix listener')
-const dovecotSocket = process.env.COUCH_AUTH_SOCK || '/var/run/couchmail/dovecot-auth.sock'
-const dovecotServer = net.createServer(dovecotAuthHandler())
-  .on('error', err => console.log(err))
-const startDovecotServer = () => {
-  console.log('Dovecot: starting handler')
-  const oldumask = process.umask(0o000)
-  dovecotServer.listen(dovecotSocket, () => { process.umask(oldumask) })
-}
-
-// See if the socket file already exists
-console.log('Dovecot: check for socket')
-if(fs.existsSync(dovecotSocket)) {
-  // Attempt to connect to a server process that is possibly already listening
-  console.log('Dovecot: auth socket already exists')
-  new net.Socket()
-    .on('error', function(e) {
-      console.log(`Dovecot: could not connect to socket ${e.code}`)
-      if (e.code == 'ECONNREFUSED') {
-        // No other server listening so delete the file
-        console.log('Dovecot: deleting unused server socket')
-        fs.unlinkSync(dovecotSocket)
-        startDovecotServer()
-      } else {
-        console.log('Some error besides conn refused happened when trying to check for an existing daemon', e)
-        process.exit(1)
-      }
-    })
-    .connect({path: dovecotSocket}, function() {
-      // If a connection is successful, another instance is already running
-      console.log('Server already running, giving up...')
-      process.exit(1)
+// ── Dovecot sieve lookups ────────────────────────────────────
+// Shares dovecot's client secret with the OAuth2 endpoint (Redis AUTH).
+const sievePort = parseInt(process.env.SIEVE_PORT || '40576')
+if (oauthClientSecret) {
+  net.createServer(sieveHandler)
+    .on('error', err => console.log(err))
+    .listen(sievePort, '127.0.0.1', () => {
+      console.log(`Sieve: listening on 127.0.0.1:${sievePort}`)
     })
 } else {
-  startDovecotServer()
+  console.log('Sieve: no client secret configured; sieve lookups disabled')
 }
