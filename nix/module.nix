@@ -180,18 +180,17 @@ in
     };
 
     # ── Dovecot integration ─────────────────────────────────────
-    services.dovecot2.extraConfig = lib.mkIf config.services.dovecot2.enable ''
+    # Dovecot 2.3 setting names; 2.4 reworked passdb dict and sieve scripts.
+    services.dovecot2.settings = lib.mkIf config.services.dovecot2.enable {
       # Auth via couchmail dict proxy
-      passdb {
-        driver = dict
-        args = /etc/dovecot/dovecot-dict-auth.conf.ext
-      }
+      passdb = {
+        driver = "dict";
+        args = "/etc/dovecot/dovecot-dict-auth.conf.ext";
+      };
 
       # Sieve via couchmail
-      plugin {
-        sieve = dict:proxy:/run/couchmail/dovecot-auth.sock:sieve;name=main_script
-      }
-    '';
+      plugin.sieve = "dict:proxy:/run/couchmail/dovecot-auth.sock:sieve;name=main_script";
+    };
 
     # ── nginx (optional) ────────────────────────────────────────
     services.nginx.virtualHosts.${cfg.nginx.virtualHost} = lib.mkIf cfg.nginx.enable {
