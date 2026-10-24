@@ -117,7 +117,7 @@ in
       extraConfigFiles = [
         (pkgs.writeText "couchmail-couchdb.ini" ''
           [chttpd]
-          authentication_handlers = {chttpd_auth, proxy_authentication_handler}, {chttpd_auth, default_authentication_handler}
+          authentication_handlers = {chttpd_auth, proxy_authentication_handler}, {chttpd_auth, cookie_authentication_handler}, {chttpd_auth, default_authentication_handler}
 
           [chttpd_auth]
           proxy_use_secret = true

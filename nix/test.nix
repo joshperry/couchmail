@@ -189,6 +189,14 @@ pkgs.testers.runNixOSTest {
         session = json.loads(machine.wait_until_succeeds("curl -sf -b /tmp/jar http://127.0.0.1:40574/couch/_session"))
         assert session["userCtx"]["name"] == "alice@${domain}", session
 
+    with subtest("CouchDB cookie login works (Futon/Fauxton)"):
+        machine.succeed("curl -sf -c /tmp/cjar -H 'Content-Type: application/json' -d '{\"name\":\"admin\",\"password\":\"adminpass\"}' http://127.0.0.1:5984/_session")
+        session = json.loads(machine.succeed("curl -sf -b /tmp/cjar http://127.0.0.1:5984/_session"))
+        assert session["userCtx"]["name"] == "admin" and "cookie" in session["info"]["authentication_handlers"], session
+        # A forged cookie must not authenticate
+        out = machine.succeed("curl -s -b AuthSession=YWRtaW46MDAwMDAwMDA6AAAA http://127.0.0.1:5984/_session")
+        assert '"name":"admin"' not in out, out
+
     with subtest("CouchDB outage is a temporary failure, not a wrong password"):
         # Kill rather than stop: stopping would also stop the bridge (Requires=)
         machine.succeed("systemctl kill -s KILL couchdb.service")
