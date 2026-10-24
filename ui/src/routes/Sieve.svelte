@@ -1,13 +1,13 @@
 <script>
   import { onMount } from 'svelte';
   import { parseScript, compileRules } from '../lib/sieve.js';
+  import { api } from '../lib/api.js';
 
   export let user;
 
   let rules = [];
   let rawScript = '';
-  let scriptId = null;
-  let scriptRev = null;
+  let version = null;
   let loading = true;
   let saving = false;
   let error = '';
@@ -16,11 +16,8 @@
 
   async function loadSieve() {
     try {
-      const res = await fetch('/_couchmail/api/sieve', { credentials: 'include' });
-      if (!res.ok) throw new Error('Failed to load sieve script');
-      const data = await res.json();
-      scriptId = data.scriptId;
-      scriptRev = data.scriptRev;
+      const data = await api('GET', '/sieve');
+      version = data.version;
       rawScript = data.script || '';
       const parsed = parseScript(rawScript);
       rules = parsed.rules;
@@ -99,19 +96,8 @@
     saving = true;
     try {
       const script = rawMode ? rawScript : compileRules(rules);
-      const res = await fetch('/_couchmail/api/sieve', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ script, scriptId, scriptRev })
-      });
-      if (!res.ok) {
-        const body = await res.json();
-        throw new Error(body.error || 'Failed to save');
-      }
-      const data = await res.json();
-      scriptId = data.scriptId;
-      scriptRev = data.scriptRev;
+      const data = await api('PUT', '/sieve', { script, version });
+      version = data.version;
       rawScript = script;
       success = 'Saved.';
       setTimeout(() => { success = ''; }, 3000);

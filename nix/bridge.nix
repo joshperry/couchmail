@@ -6,7 +6,7 @@ buildNpmPackage {
 
   src = ../bridge;
 
-  npmDepsHash = "sha256-fsX+CpoOFfYo9fmGVaEYFdv2ZsDvK3g8+VA6UmGwUpM=";
+  npmDepsHash = "sha256-XdSos5hL13f6Anni0GvpuXjh5er1voeOmXbBtApM108=";
 
   dontNpmBuild = true;
 
@@ -15,20 +15,23 @@ buildNpmPackage {
 
     mkdir -p $out/bin $out/lib/couchmail
     cp -r node_modules $out/lib/couchmail/
-    cp server.js $out/lib/couchmail/
-    cp package.json $out/lib/couchmail/
+    cp *.js package.json $out/lib/couchmail/
 
     cat > $out/bin/couchmail <<EOF
     #!/bin/sh
     exec ${nodejs}/bin/node $out/lib/couchmail/server.js "\$@"
     EOF
-    chmod +x $out/bin/couchmail
+    cat > $out/bin/couchmail-ctl <<EOF
+    #!/bin/sh
+    exec ${nodejs}/bin/node $out/lib/couchmail/ctl.js "\$@"
+    EOF
+    chmod +x $out/bin/couchmail $out/bin/couchmail-ctl
 
     runHook postInstall
   '';
 
   meta = {
-    description = "CouchDB mail bridge for postfix virtual lookups and dovecot auth/sieve";
+    description = "Mail bridge for postfix virtual lookups, dovecot auth/sieve and the couchmail web UI";
     license = lib.licenses.mit;
     platforms = lib.platforms.linux;
   };

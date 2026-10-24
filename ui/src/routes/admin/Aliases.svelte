@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { allDocs, putDoc, deleteDoc, getDoc } from '../../lib/couch.js';
+  import { api, enc } from '../../lib/api.js';
 
   export let user;
 
@@ -19,14 +19,9 @@
 
   async function loadAliases() {
     try {
-      const result = await allDocs({
-        startkey: 'alias-',
-        endkey: 'alias-\ufff0',
-        include_docs: true
-      });
-      aliases = (result.rows || []).map(r => r.doc);
+      aliases = (await api('GET', '/admin/aliases')).aliases;
     } catch (e) {
-      error = 'Failed to load aliases.';
+      error = e.message || 'Failed to load aliases.';
     }
   }
 
@@ -48,11 +43,7 @@
       return;
     }
     try {
-      await putDoc({
-        _id: 'alias-' + address,
-        target,
-        description: newDescription.trim()
-      });
+      await api('POST', '/admin/aliases', { address, target, description: newDescription.trim() });
       newAddress = '';
       newTarget = '';
       newDescription = '';
@@ -63,8 +54,9 @@
   }
 
   async function removeAlias(alias) {
+    error = '';
     try {
-      await deleteDoc(alias);
+      await api('DELETE', `/admin/aliases/${enc(alias.address)}`);
       await loadAliases();
     } catch (e) {
       error = e.message || 'Failed to delete alias.';
@@ -72,7 +64,7 @@
   }
 
   function startEdit(alias) {
-    editingId = alias._id;
+    editingId = alias.address;
     editTarget = alias.target || '';
     editDescription = alias.description || '';
   }
@@ -82,10 +74,9 @@
   }
 
   async function saveEdit(alias) {
+    error = '';
     try {
-      await putDoc({
-        _id: alias._id,
-        _rev: alias._rev,
+      await api('PUT', `/admin/aliases/${enc(alias.address)}`, {
         target: editTarget.trim(),
         description: editDescription.trim()
       });
@@ -114,7 +105,7 @@
         <input id="alias-addr" type="text" bind:value={newAddress} placeholder="info@example.com" />
       </div>
       <div class="form-group">
-        <label for="alias-target">Target email</label>
+        <label for="alias-target">Target email (comma-separate several)</label>
         <input id="alias-target" type="text" bind:value={newTarget} placeholder="user@example.com" />
       </div>
       <div class="form-group">
@@ -129,7 +120,7 @@
   </div>
 
   <div class="card">
-    <h2>All aliases</h2>
+    <h2>Aliases</h2>
     {#if aliases.length === 0}
       <p>No aliases configured.</p>
     {:else}
@@ -145,8 +136,8 @@
         <tbody>
           {#each aliases as alias}
             <tr>
-              <td>{alias._id.replace('alias-', '')}</td>
-              {#if editingId === alias._id}
+              <td>{alias.address}</td>
+              {#if editingId === alias.address}
                 <td>
                   <input type="text" bind:value={editTarget} class="edit-input" />
                 </td>
@@ -158,8 +149,8 @@
                   <button class="btn-cancel" on:click={cancelEdit}>Cancel</button>
                 </td>
               {:else}
-                <td>{alias.target || ''}</td>
-                <td>{alias.description || ''}</td>
+                <td>{alias.target}</td>
+                <td>{alias.description}</td>
                 <td class="actions">
                   <button class="btn-edit" on:click={() => startEdit(alias)}>Edit</button>
                   <button class="btn-danger" on:click={() => removeAlias(alias)}>Delete</button>

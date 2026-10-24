@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { getSession, logout } from './lib/couch.js';
+  import { getSession, logout, canAdminister } from './lib/api.js';
   import Login from './routes/Login.svelte';
   import Dashboard from './routes/Dashboard.svelte';
   import Settings from './routes/Settings.svelte';
@@ -84,7 +84,7 @@
     navigate('dashboard');
   }
 
-  $: isAdmin = user && user.roles && user.roles.includes('admin');
+  $: isAdmin = canAdminister(user);
   $: currentComponent = routes[route] || Dashboard;
 </script>
 

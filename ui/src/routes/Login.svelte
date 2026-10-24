@@ -1,6 +1,6 @@
 <script>
   import { createEventDispatcher } from 'svelte';
-  import { login, getSession } from '../lib/couch.js';
+  import { login, getSession } from '../lib/api.js';
 
   const dispatch = createEventDispatcher();
 

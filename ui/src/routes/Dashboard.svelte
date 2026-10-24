@@ -1,26 +1,18 @@
 <script>
   import { onMount } from 'svelte';
-  import { getDoc, allDocs } from '../lib/couch.js';
+  import { api, canAdminister } from '../lib/api.js';
 
   export let user;
 
-  let userDoc = null;
-  let aliases = [];
+  let me = null;
   let loading = true;
   let error = '';
 
-  $: isAdmin = user && user.roles && user.roles.includes('admin');
+  $: isAdmin = canAdminister(user);
 
   onMount(async () => {
     try {
-      const [docResult, aliasResult] = await Promise.all([
-        getDoc('org.couchdb.user:' + user.name).catch(() => null),
-        allDocs({ startkey: 'alias-', endkey: 'alias-\ufff0', include_docs: true }).catch(() => ({ rows: [] }))
-      ]);
-      userDoc = docResult;
-      aliases = (aliasResult.rows || [])
-        .map(r => r.doc)
-        .filter(d => d && d.target === user.name);
+      me = await api('GET', '/me');
     } catch (e) {
       error = 'Failed to load dashboard data.';
     } finally {
@@ -37,21 +29,22 @@
   <div class="card"><p class="error">{error}</p></div>
 {:else}
   <div class="card">
-    <h2>Welcome, {user.name}</h2>
-    {#if userDoc && userDoc.domain}
-      <p>Domain: <strong>{userDoc.domain}</strong></p>
+    <h2>Welcome, {me.name}</h2>
+    <p>Domain: <strong>{me.domain}</strong></p>
+    {#if me.adminDomains.length}
+      <p>You administer: <strong>{me.adminDomains.join(', ')}</strong></p>
     {/if}
   </div>
 
   <div class="card">
     <h2>Your aliases</h2>
-    {#if aliases.length === 0}
+    {#if me.aliases.length === 0}
       <p>No aliases point to your account.</p>
     {:else}
       <ul>
-        {#each aliases as alias}
+        {#each me.aliases as alias}
           <li>
-            <strong>{alias._id.replace('alias-', '')}</strong>
+            <strong>{alias.address}</strong>
             {#if alias.description}&mdash; {alias.description}{/if}
           </li>
         {/each}
@@ -74,6 +67,7 @@
         <a href="#/admin/users">Users</a>
         <a href="#/admin/domains">Domains</a>
         <a href="#/admin/aliases">Aliases</a>
+        <a href="#/admin/invites">Invites</a>
       </div>
     </div>
   {/if}

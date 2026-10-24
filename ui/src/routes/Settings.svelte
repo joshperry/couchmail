@@ -1,4 +1,6 @@
 <script>
+  import { api } from '../lib/api.js';
+
   export let user;
 
   let newPassword = '';
@@ -22,17 +24,8 @@
 
     submitting = true;
     try {
-      const res = await fetch('/_couchmail/api/password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ username: user.name, new_password: newPassword })
-      });
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(body || 'Password change failed');
-      }
-      success = 'Password changed successfully.';
+      await api('POST', '/password', { new_password: newPassword });
+      success = 'Password changed. Other sessions have been signed out.';
       newPassword = '';
       confirmPassword = '';
     } catch (e) {

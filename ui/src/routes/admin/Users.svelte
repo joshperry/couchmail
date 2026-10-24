@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { allDocs, putDoc, deleteDoc } from '../../lib/couch.js';
+  import { api, enc, isAdmin } from '../../lib/api.js';
 
   export let user;
 
@@ -13,16 +13,16 @@
   let newAdmin = false;
   let formError = '';
 
+  let resetFor = null;
+  let resetPassword = '';
+
+  $: globalAdmin = isAdmin(user);
+
   async function loadUsers() {
     try {
-      const result = await allDocs({
-        startkey: 'org.couchdb.user:',
-        endkey: 'org.couchdb.user:\ufff0',
-        include_docs: true
-      });
-      users = (result.rows || []).map(r => r.doc);
+      users = (await api('GET', '/admin/users')).users;
     } catch (e) {
-      error = 'Failed to load users.';
+      error = e.message || 'Failed to load users.';
     }
   }
 
@@ -31,27 +31,27 @@
     loading = false;
   });
 
+  function rolesOf(u) {
+    const roles = [];
+    if (u.isAdmin) roles.push('admin');
+    if (u.adminDomains.length) roles.push(`domain admin: ${u.adminDomains.join(', ')}`);
+    if (!u.hasPassword) roles.push('no password');
+    return roles.join('; ') || 'user';
+  }
+
   async function createUser() {
     formError = '';
-    const email = newEmail.trim();
-    if (!email) {
+    const address = newEmail.trim();
+    if (!address) {
       formError = 'Email is required.';
       return;
     }
-    if (!newPassword) {
-      formError = 'Password is required.';
+    if (newPassword.length < 8) {
+      formError = 'Password must be at least 8 characters.';
       return;
     }
-    const roles = newAdmin ? ['admin'] : [];
     try {
-      await putDoc({
-        _id: 'org.couchdb.user:' + email,
-        name: email,
-        type: 'user',
-        roles,
-        password: newPassword,
-        dovecot_password: ''
-      });
+      await api('POST', '/admin/users', { address, password: newPassword, isAdmin: newAdmin });
       newEmail = '';
       newPassword = '';
       newAdmin = false;
@@ -62,11 +62,35 @@
   }
 
   async function removeUser(u) {
+    if (!confirm(`Delete ${u.address}? Their mail stays on disk, but they can no longer log in or receive mail.`)) return;
+    error = '';
     try {
-      await deleteDoc(u);
+      await api('DELETE', `/admin/users/${enc(u.address)}`);
       await loadUsers();
     } catch (e) {
       error = e.message || 'Failed to delete user.';
+    }
+  }
+
+  async function toggleAdmin(u) {
+    error = '';
+    try {
+      await api('PATCH', `/admin/users/${enc(u.address)}`, { isAdmin: !u.isAdmin });
+      await loadUsers();
+    } catch (e) {
+      error = e.message || 'Failed to change admin role.';
+    }
+  }
+
+  async function saveReset(u) {
+    error = '';
+    try {
+      await api('POST', '/password', { username: u.address, new_password: resetPassword });
+      resetFor = null;
+      resetPassword = '';
+      await loadUsers();
+    } catch (e) {
+      error = e.message || 'Failed to set password.';
     }
   }
 </script>
@@ -91,12 +115,14 @@
         <label for="new-pw">Password</label>
         <input id="new-pw" type="password" bind:value={newPassword} />
       </div>
-      <div class="checkbox-group">
-        <label>
-          <input type="checkbox" bind:checked={newAdmin} />
-          Admin
-        </label>
-      </div>
+      {#if globalAdmin}
+        <div class="checkbox-group">
+          <label>
+            <input type="checkbox" bind:checked={newAdmin} />
+            Admin
+          </label>
+        </div>
+      {/if}
       {#if formError}
         <p class="error">{formError}</p>
       {/if}
@@ -105,7 +131,7 @@
   </div>
 
   <div class="card">
-    <h2>All users</h2>
+    <h2>{globalAdmin ? 'All users' : 'Users in your domains'}</h2>
     {#if users.length === 0}
       <p>No users found.</p>
     {:else}
@@ -120,10 +146,24 @@
         <tbody>
           {#each users as u}
             <tr>
-              <td>{u.name}</td>
-              <td>{(u.roles || []).join(', ') || 'user'}</td>
+              <td>{u.address}</td>
+              <td>{rolesOf(u)}</td>
               <td class="actions">
-                <button class="btn-danger" on:click={() => removeUser(u)}>Delete</button>
+                {#if resetFor === u.address}
+                  <form class="inline-reset" on:submit|preventDefault={() => saveReset(u)}>
+                    <input type="password" bind:value={resetPassword} placeholder="New password" />
+                    <button type="submit">Save</button>
+                    <button type="button" on:click={() => { resetFor = null; resetPassword = ''; }}>Cancel</button>
+                  </form>
+                {:else}
+                  <button on:click={() => { resetFor = u.address; resetPassword = ''; }}>Set password</button>
+                  {#if globalAdmin && u.address !== user.name}
+                    <button on:click={() => toggleAdmin(u)}>{u.isAdmin ? 'Remove admin' : 'Make admin'}</button>
+                  {/if}
+                  {#if u.address !== user.name}
+                    <button class="btn-danger" on:click={() => removeUser(u)}>Delete</button>
+                  {/if}
+                {/if}
               </td>
             </tr>
           {/each}
@@ -173,5 +213,20 @@
   }
   button[type="submit"] {
     margin-top: 0.5rem;
+  }
+  .actions button {
+    font-size: 0.85rem;
+    padding: 0.25rem 0.6rem;
+    margin-left: 0.25rem;
+  }
+  .inline-reset {
+    display: inline-flex;
+    gap: 0.25rem;
+  }
+  .inline-reset button {
+    margin-top: 0;
+  }
+  .inline-reset input {
+    width: 10rem;
   }
 </style>

@@ -1,5 +1,5 @@
 {
-  description = "Couchmail — CouchDB-backed mail management with web UI";
+  description = "Couchmail — mail management for postfix and dovecot with a web UI";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";

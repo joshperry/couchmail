@@ -5,10 +5,12 @@ flake:
 let
   cfg = config.services.couchmail;
   packages = flake.packages.${pkgs.stdenv.hostPlatform.system};
+  imp = cfg.importFromCouchdb;
+  stateDir = "/var/lib/couchmail";
 in
 {
   options.services.couchmail = {
-    enable = lib.mkEnableOption "Couchmail — CouchDB mail bridge with web UI";
+    enable = lib.mkEnableOption "Couchmail — mail bridge for postfix/dovecot with a web UI";
 
     domain = lib.mkOption {
       type = lib.types.str;
@@ -16,54 +18,26 @@ in
       description = "Primary mail domain";
     };
 
-    couchdbDataDir = lib.mkOption {
-      type = lib.types.path;
-      default = "/var/lib/couchdb";
-      description = "CouchDB data directory";
-    };
-
-    couchdbCredentialsFile = lib.mkOption {
-      type = lib.types.path;
-      description = ''
-        Environment file for CouchDB admin credentials.
-        Should contain COUCHDB_USER and COUCHDB_PASSWORD.
-      '';
-    };
-
-    bridgePasswordFile = lib.mkOption {
-      type = lib.types.path;
-      description = ''
-        Environment file for the couchmail bridge.
-        Should contain COUCH_PASSWORD.
-      '';
-    };
-
-    couchdbPort = lib.mkOption {
-      type = lib.types.port;
-      default = 5984;
-      description = "Port for CouchDB to listen on";
-    };
-
     bridgePorts = {
       domain = lib.mkOption {
         type = lib.types.port;
         default = 40571;
-        description = "TCP port for postfix virtual_mailbox_domains lookup";
+        description = "Loopback TCP port for postfix virtual_mailbox_domains lookup";
       };
       mailbox = lib.mkOption {
         type = lib.types.port;
         default = 40572;
-        description = "TCP port for postfix virtual_mailbox_maps lookup";
+        description = "Loopback TCP port for postfix virtual_mailbox_maps lookup";
       };
       alias = lib.mkOption {
         type = lib.types.port;
         default = 40573;
-        description = "TCP port for postfix virtual_alias_maps lookup";
+        description = "Loopback TCP port for postfix virtual_alias_maps lookup";
       };
       password = lib.mkOption {
         type = lib.types.port;
         default = 40574;
-        description = "HTTP port for bridge (auth, password, CouchDB proxy)";
+        description = "Loopback HTTP port for the web API (proxied by nginx at /_couchmail/api/)";
       };
       sieve = lib.mkOption {
         type = lib.types.port;
@@ -95,64 +69,64 @@ in
       '';
     };
 
+    importFromCouchdb = {
+      enable = lib.mkEnableOption ''
+        a one-time import from couchmail's old CouchDB `mail` database. Runs
+        CouchDB as before; the bridge copies everything into its SQLite
+        database (${stateDir}/couchmail.db) on its first start and never
+        writes to CouchDB. Turn this off once the import has run (the
+        journal says "Import: imported ..."); CouchDB's data is left in place
+      '';
+      dataDir = lib.mkOption {
+        type = lib.types.path;
+        default = "/var/lib/couchdb";
+        description = "CouchDB data directory";
+      };
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 5984;
+        description = "Port for CouchDB to listen on (loopback)";
+      };
+      credentialsFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = ''
+          Environment file for CouchDB admin credentials.
+          Should contain COUCHDB_USER and COUCHDB_PASSWORD.
+        '';
+      };
+      bridgePasswordFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = ''
+          Environment file with the bridge's CouchDB password (COUCH_PASSWORD)
+          for the `mail` admin user it imports as.
+        '';
+      };
+    };
+
     nginx = {
-      enable = lib.mkEnableOption "nginx reverse proxy for CouchDB";
+      enable = lib.mkEnableOption "nginx locations for the couchmail web UI and API";
       virtualHost = lib.mkOption {
         type = lib.types.str;
         default = "mail.${cfg.domain}";
-        description = "nginx virtual host name for CouchDB proxy";
+        description = "nginx virtual host to serve the web UI on";
       };
     };
   };
 
-  config = lib.mkIf cfg.enable {
+  config = lib.mkIf cfg.enable (lib.mkMerge [{
 
-    # ── CouchDB service ─────────────────────────────────────────
-    services.couchdb = {
-      enable = true;
-      package = pkgs.couchdb3;
-      bindAddress = "127.0.0.1";
-      port = cfg.couchdbPort;
-      databaseDir = cfg.couchdbDataDir;
-      extraConfigFiles = [
-        (pkgs.writeText "couchmail-couchdb.ini" ''
-          [chttpd]
-          authentication_handlers = {chttpd_auth, proxy_authentication_handler}, {chttpd_auth, cookie_authentication_handler}, {chttpd_auth, default_authentication_handler}
-
-          [chttpd_auth]
-          proxy_use_secret = true
-
-          [couchdb]
-          single_node = true
-        '')
-      ];
-    };
-
-    # Generate local.ini with admin credentials and proxy secret
-    systemd.services.couchdb.serviceConfig.ExecStartPre = lib.mkAfter [
-      "+${pkgs.writeShellScript "couchdb-write-admins" ''
-        set -euo pipefail
-        read_env() { ${pkgs.gnugrep}/bin/grep "^$1=" "$2" | ${pkgs.coreutils}/bin/cut -d= -f2-; }
-        couchdb_user=$(read_env COUCHDB_USER ${cfg.couchdbCredentialsFile})
-        couchdb_pass=$(read_env COUCHDB_PASSWORD ${cfg.couchdbCredentialsFile})
-        couch_pass=$(read_env COUCH_PASSWORD ${cfg.bridgePasswordFile})
-
-        # Proxy auth secret, derived from the bridge's password exactly as the
-        # bridge derives it, so it never has to be shared through a file.
-        # printf is a builtin, so the password never appears in argv.
-        proxy_secret=$(printf '%s' "couchmail-proxy-secret:$couch_pass" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1)
-
-        local_ini=${cfg.couchdbDataDir}/local.ini
-        {
-          printf '[admins]\n'
-          printf '%s = %s\n' "$couchdb_user" "$couchdb_pass"
-          printf 'mail = %s\n' "$couch_pass"
-          printf '\n[chttpd_auth]\n'
-          printf 'secret = %s\n' "$proxy_secret"
-        } > "$local_ini"
-        chown couchdb:couchdb "$local_ini"
-        chmod 600 "$local_ini"
-      ''}"
+    assertions = [
+      {
+        assertion = !imp.enable || (imp.credentialsFile != null && imp.bridgePasswordFile != null);
+        message = "services.couchmail.importFromCouchdb needs credentialsFile and bridgePasswordFile.";
+      }
+      {
+        assertion = !config.services.dovecot2.enable
+          || lib.versionAtLeast config.services.dovecot2.package.version "2.4";
+        message = "services.couchmail requires Dovecot 2.4 (passdb oauth2 and 2.4 sieve settings).";
+      }
     ];
 
     # ── Couchmail bridge ────────────────────────────────────────
@@ -162,48 +136,61 @@ in
     };
     users.groups.couchmail = { };
 
+    # Admin CLI; run as the couchmail user, e.g.
+    #   sudo -u couchmail couchmail-ctl add-user you@example.com --admin
+    environment.systemPackages = [ packages.couchmail ]
+      # Sieve storage and the LMTP sieve plugin need pigeonhole's modules
+      ++ lib.optional config.services.dovecot2.enable
+        config.services.dovecot2.package.passthru.dovecot_pigeonhole;
+
     systemd.services.couchmail = {
-      description = "CouchDB mail bridge for postfix/dovecot";
-      requires = [ "couchdb.service" ];
-      after = [ "couchdb.service" "network.target" ];
+      description = "Couchmail mail bridge for postfix/dovecot";
+      after = [ "network.target" ] ++ lib.optional imp.enable "couchdb.service";
+      wants = lib.optional imp.enable "couchdb.service";
       wantedBy = [ "multi-user.target" ];
       environment = {
-        COUCH_HOST = "localhost";
-        COUCH_USER = "mail";
+        DB_PATH = "${stateDir}/couchmail.db";
+        DOMAIN_PORT = toString cfg.bridgePorts.domain;
+        MAILBOX_PORT = toString cfg.bridgePorts.mailbox;
+        ALIAS_PORT = toString cfg.bridgePorts.alias;
         PASSWORD_PORT = toString cfg.bridgePorts.password;
         OAUTH2_PORT = toString cfg.bridgePorts.oauth2;
         SIEVE_PORT = toString cfg.bridgePorts.sieve;
+      } // lib.optionalAttrs imp.enable {
+        COUCH_IMPORT = "1";
+        COUCH_HOST = "127.0.0.1";
+        COUCH_PORT = toString imp.port;
+        COUCH_USER = "mail";
       };
       serviceConfig = {
         ExecStart = "${packages.couchmail}/bin/couchmail";
         LoadCredential = [ "oauth2-client-secret:${cfg.oauth2ClientSecretFile}" ];
-        EnvironmentFile = cfg.bridgePasswordFile;
+        EnvironmentFile = lib.mkIf imp.enable imp.bridgePasswordFile;
         User = "couchmail";
         Group = "couchmail";
+        StateDirectory = "couchmail";
+        StateDirectoryMode = "0700";
+        UMask = "0077";
         Restart = "on-failure";
         RestartSec = 5;
+
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+        NoNewPrivileges = true;
+        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" ];
       };
     };
 
     # ── Postfix virtual map integration ─────────────────────────
     services.postfix.settings.main = lib.mkIf config.services.postfix.enable {
-      virtual_mailbox_domains = "tcp:localhost:${toString cfg.bridgePorts.domain}";
-      virtual_mailbox_maps = "tcp:localhost:${toString cfg.bridgePorts.mailbox}";
-      virtual_alias_maps = "tcp:localhost:${toString cfg.bridgePorts.alias}";
+      virtual_mailbox_domains = "tcp:127.0.0.1:${toString cfg.bridgePorts.domain}";
+      virtual_mailbox_maps = "tcp:127.0.0.1:${toString cfg.bridgePorts.mailbox}";
+      virtual_alias_maps = "tcp:127.0.0.1:${toString cfg.bridgePorts.alias}";
     };
 
     # ── Dovecot integration (2.4) ───────────────────────────────
-    assertions = [{
-      assertion = !config.services.dovecot2.enable
-        || lib.versionAtLeast config.services.dovecot2.package.version "2.4";
-      message = "services.couchmail requires Dovecot 2.4 (passdb oauth2 and 2.4 sieve settings).";
-    }];
-
-    # Sieve storage and the LMTP sieve plugin need pigeonhole's modules
-    environment.systemPackages = lib.mkIf config.services.dovecot2.enable [
-      config.services.dovecot2.package.passthru.dovecot_pigeonhole
-    ];
-
     services.dovecot2.settings = lib.mkIf config.services.dovecot2.enable {
       # Auth: dovecot hands credentials to the bridge (OAuth2 password grant).
       # This passdb can only verify passwords, not answer lookups, so a static
@@ -247,9 +234,50 @@ in
       locations."/_couchmail/api/" = {
         proxyPass = "http://127.0.0.1:${toString cfg.bridgePorts.password}/";
       };
-      locations."/mail/" = {
-        proxyPass = "http://127.0.0.1:${toString cfg.bridgePorts.password}/couch/mail/";
-      };
     };
-  };
+
+  }
+
+  # ── CouchDB, only while importing ───────────────────────────
+  (lib.mkIf imp.enable {
+    services.couchdb = {
+      enable = true;
+      package = pkgs.couchdb3;
+      bindAddress = "127.0.0.1";
+      port = imp.port;
+      databaseDir = imp.dataDir;
+      extraConfigFiles = [
+        (pkgs.writeText "couchmail-couchdb.ini" ''
+          [couchdb]
+          single_node = true
+        '')
+      ];
+    };
+
+    # Generate local.ini with the admin credentials
+    systemd.services.couchdb.serviceConfig.ExecStartPre = lib.mkAfter [
+      "+${pkgs.writeShellScript "couchdb-write-admins" ''
+        set -euo pipefail
+        read_env() { ${pkgs.gnugrep}/bin/grep "^$1=" "$2" | ${pkgs.coreutils}/bin/cut -d= -f2-; }
+        couchdb_user=$(read_env COUCHDB_USER ${imp.credentialsFile})
+        couchdb_pass=$(read_env COUCHDB_PASSWORD ${imp.credentialsFile})
+        couch_pass=$(read_env COUCH_PASSWORD ${imp.bridgePasswordFile})
+
+        # Cookie secret for Futon logins, stable across restarts. printf is a
+        # builtin, so the password never appears in argv.
+        cookie_secret=$(printf '%s' "couchmail-proxy-secret:$couch_pass" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1)
+
+        local_ini=${imp.dataDir}/local.ini
+        {
+          printf '[admins]\n'
+          printf '%s = %s\n' "$couchdb_user" "$couchdb_pass"
+          printf 'mail = %s\n' "$couch_pass"
+          printf '\n[chttpd_auth]\n'
+          printf 'secret = %s\n' "$cookie_secret"
+        } > "$local_ini"
+        chown couchdb:couchdb "$local_ini"
+        chmod 600 "$local_ini"
+      ''}"
+    ];
+  })]);
 }
