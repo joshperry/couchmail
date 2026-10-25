@@ -130,6 +130,14 @@ services.couchmail.importFromCouchdb = {
 };
 ```
 
+To see what the import will do first, without touching the running bridge:
+
+```sh
+couchmail-ctl import-couchdb --couch-env /run/secrets/couchmail-env   # COUCH_PASSWORD (and COUCH_USER, COUCH_HOST, COUCH_PORT if not mail@127.0.0.1:5984)
+```
+
+This imports into memory and prints the warnings and the result; `--into trial.db` keeps the result in a new database file instead. It only needs read access to CouchDB.
+
 On its first start with an empty database the bridge copies the `mail` database into SQLite in one transaction, logs `Import: imported ...` (and a warning for anything odd), and only then starts listening. CouchDB is only read. Once the import has run, turn the option off and switch again: CouchDB stops, and its data stays where it was as a fallback. Plaintext `password` fields the old UI stored are not imported; an account that had only a plaintext password gets it as a bcrypt hash.
 
 ## File structure

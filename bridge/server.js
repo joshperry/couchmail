@@ -5,7 +5,7 @@ const net = require('net'),
       carrier = require('carrier'),
       store = require('./store'),
       { createApi, checkCredentials } = require('./api'),
-      { importFromCouch } = require('./import-couch')
+      { importFromCouch, couchFromEnv } = require('./import-couch')
 
 const dbPath = process.env.DB_PATH || '/var/lib/couchmail/couchmail.db'
 const db = store.open(dbPath)
@@ -330,12 +330,7 @@ async function main() {
     } else if (!db.isEmpty()) {
       console.log('Import: database already has data; not importing from CouchDB')
     } else {
-      await importFromCouch(db, {
-        host: process.env.COUCH_HOST || '127.0.0.1',
-        port: parseInt(process.env.COUCH_PORT || '5984'),
-        user: process.env.COUCH_USER || 'mail',
-        password: process.env.COUCH_PASSWORD,
-      })
+      await importFromCouch(db, couchFromEnv(process.env))
     }
   }
 

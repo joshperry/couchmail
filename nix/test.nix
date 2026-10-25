@@ -188,6 +188,17 @@ pkgs.testers.runNixOSTest {
     couch_put("invite-abc123", {"domain": "${domain}", "created_by": "root@${domain}",
                                 "created_at": "2026-01-01T00:00:00.000Z", "used_by": None, "used_at": None})
 
+    with subtest("import dry run touches neither CouchDB nor the bridge's database"):
+        out = machine.succeed("cd /tmp && couchmail-ctl import-couchdb --couch-env ${secrets}/bridge.env 2>&1")
+        assert "Import: imported 1 domains, 3 users (1 admins), 1 aliases, 1 invites, 1 sieve scripts" in out, out
+        assert "user   root@${domain}  [admin]" in out, out
+        assert "Dry run: nothing was written" in out, out
+        machine.fail(f"test -e {DB}")
+        machine.succeed("couchmail-ctl import-couchdb --couch-env ${secrets}/bridge.env --into /tmp/trial.db")
+        machine.succeed("DB_PATH=/tmp/trial.db couchmail-ctl list | grep -q 'alias  info@${domain}'")
+        machine.fail("couchmail-ctl import-couchdb --couch-env ${secrets}/bridge.env --into /tmp/trial.db")
+        machine.fail(f"test -e {DB}")
+
     with subtest("bridge imports CouchDB once, then runs without it"):
         machine.systemctl("start couchmail.service")
         machine.wait_for_open_port(40575)

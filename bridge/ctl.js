@@ -2,8 +2,10 @@
 // Run as the couchmail user (e.g. `sudo -u couchmail couchmail-ctl ...`).
 // Passwords are read from stdin, never from argv.
 
+const fs = require('fs')
 const store = require('./store')
 const { hashPassword } = require('./passwords')
+const { importFromCouch, couchFromEnv } = require('./import-couch')
 
 const usage = `usage: couchmail-ctl <command> [args]
 
@@ -14,8 +16,14 @@ const usage = `usage: couchmail-ctl <command> [args]
   add-domain-admin <domain> <address>
   list                               domains, users and aliases
   dump                               everything as JSON (includes password hashes)
+  import-couchdb [--couch-env FILE] [--into PATH]
+                                     import from CouchDB without the bridge: into
+                                     memory (a dry run; prints warnings and the
+                                     result) or into a new database at PATH
 
-DB_PATH selects the database (default /var/lib/couchmail/couchmail.db).`
+DB_PATH selects the database (default /var/lib/couchmail/couchmail.db).
+import-couchdb never opens it; it reads COUCH_PASSWORD (and optionally
+COUCH_HOST, COUCH_PORT, COUCH_USER) from the environment or FILE.`
 
 function readStdin() {
   return new Promise((resolve, reject) => {
@@ -34,9 +42,62 @@ async function readPassword() {
   return password
 }
 
+// KEY=VALUE lines, as in a systemd EnvironmentFile
+function readEnvFile(path) {
+  const env = {}
+  for (const line of fs.readFileSync(path, 'utf8').split('\n')) {
+    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$/)
+    if (m) env[m[1]] = m[2].replace(/^(["'])(.*)\1$/, '$2')
+  }
+  return env
+}
+
+function option(args, name) {
+  const i = args.indexOf(name)
+  if (i === -1) return null
+  if (i + 1 >= args.length) throw new store.Invalid(usage)
+  return args[i + 1]
+}
+
+function printList(db) {
+  for (const d of db.listDomains(null)) {
+    console.log(`${d.name}  (${d.users} users, ${d.aliases} aliases${d.admins.length ? `, admins: ${d.admins.join(', ')}` : ''})`)
+  }
+  for (const u of db.listUsers(null)) {
+    console.log(`user   ${u.address}${u.isAdmin ? '  [admin]' : ''}${u.hasPassword ? '' : '  [no password]'}`)
+  }
+  for (const a of db.listAliases(null)) console.log(`alias  ${a.address} -> ${a.target}`)
+}
+
+async function importCouchdb(args) {
+  const envFile = option(args, '--couch-env')
+  const into = option(args, '--into')
+  let couch
+  try {
+    couch = couchFromEnv({ ...process.env, ...(envFile ? readEnvFile(envFile) : {}) })
+  } catch (err) {
+    throw new store.Invalid(err.message)
+  }
+  if (into && fs.existsSync(into)) throw new store.Invalid(`${into} already exists; --into creates a new database`)
+
+  const db = store.open(into || ':memory:')
+  await importFromCouch(db, couch)
+  console.log()
+  printList(db)
+  if (!into) console.log('\nDry run: nothing was written')
+}
+
+const DB_COMMANDS = new Set(['add-domain', 'add-user', 'set-password', 'set-admin', 'add-domain-admin', 'list', 'dump'])
+
 async function main(argv) {
   const [cmd, ...args] = argv
   const need = n => { if (args.length < n) throw new store.Invalid(usage) }
+  if (cmd === 'import-couchdb') return importCouchdb(args)
+  // Don't create a database just to print usage
+  if (!DB_COMMANDS.has(cmd)) {
+    console.error(usage)
+    process.exit(cmd ? 2 : 0)
+  }
   const db = store.open(process.env.DB_PATH || '/var/lib/couchmail/couchmail.db')
 
   switch (cmd) {
@@ -67,25 +128,16 @@ async function main(argv) {
       db.addDomainAdmin(args[0], args[1])
       break
     case 'list':
-      for (const d of db.listDomains(null)) {
-        console.log(`${d.name}  (${d.users} users, ${d.aliases} aliases${d.admins.length ? `, admins: ${d.admins.join(', ')}` : ''})`)
-      }
-      for (const u of db.listUsers(null)) {
-        console.log(`user   ${u.address}${u.isAdmin ? '  [admin]' : ''}${u.hasPassword ? '' : '  [no password]'}`)
-      }
-      for (const a of db.listAliases(null)) console.log(`alias  ${a.address} -> ${a.target}`)
+      printList(db)
       break
     case 'dump':
       console.log(JSON.stringify(db.dump(), null, 2))
       break
-    default:
-      console.error(usage)
-      process.exit(cmd ? 2 : 0)
   }
 }
 
 main(process.argv.slice(2)).catch(err => {
   console.error(err instanceof store.Invalid || err instanceof store.Conflict || err instanceof store.NotFound
-    ? err.message : err.stack)
+    || err.message.startsWith('CouchDB ') ? err.message : err.stack)
   process.exit(1)
 })

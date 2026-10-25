@@ -2,17 +2,29 @@
 // Runs at bridge startup when COUCH_IMPORT is set and the SQLite database is
 // still empty; everything happens in one transaction, so a failed import
 // leaves nothing behind and the next start tries again. CouchDB is only read.
+// `couchmail-ctl import-couchdb` runs the same import without the bridge.
 
 const bcrypt = require('bcryptjs')
 const { norm } = require('./store')
 
 const USER_PREFIX = 'org.couchdb.user:'
 
+// CouchDB connection from COUCH_* variables
+function couchFromEnv(env) {
+  if (!env.COUCH_PASSWORD) throw new Error('COUCH_PASSWORD is not set')
+  return {
+    host: env.COUCH_HOST || '127.0.0.1',
+    port: parseInt(env.COUCH_PORT || '5984'),
+    user: env.COUCH_USER || 'mail',
+    password: env.COUCH_PASSWORD,
+  }
+}
+
 async function fetchAllDocs({ host, port, user, password }) {
   const url = `http://${host}:${port}/mail/_all_docs?include_docs=true`
   const res = await fetch(url, {
     headers: { Authorization: `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}` },
-  })
+  }).catch(err => { throw new Error(`CouchDB at ${host}:${port}: ${err.cause?.message || err.message}`) })
   if (!res.ok) throw new Error(`CouchDB ${url.replace(/\?.*/, '')}: HTTP ${res.status}`)
   return (await res.json()).rows.map(r => r.doc).filter(Boolean)
 }
@@ -117,4 +129,4 @@ async function importFromCouch(store, couch, log = console.log) {
   return stats
 }
 
-module.exports = { importFromCouch }
+module.exports = { importFromCouch, couchFromEnv }
